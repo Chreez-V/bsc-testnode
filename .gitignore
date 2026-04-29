@@ -30,6 +30,7 @@
 /geth*.zip.sig
 /geth*.zip.asc
 
+node_data/
 
 # travis
 profile.tmp
