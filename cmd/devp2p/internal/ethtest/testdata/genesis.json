@@ -18,29 +18,36 @@
     "arrowGlacierBlock": 0,
     "grayGlacierBlock": 0,
     "mergeNetsplitBlock": 0,
-    "shanghaiTime": 0,
+    "ramanujanBlock": 0,
+    "nielsBlock": 0,
     "mirrorSyncBlock": 0,
     "brunoBlock": 0,
     "eulerBlock": 0,
+    "nanoBlock": 0,
+    "moranBlock": 0,
     "gibbsBlock": 0,
     "planckBlock": 0,
     "lubanBlock": 0,
     "platoBlock": 0,
     "hertzBlock": 0,
     "hertzfixBlock": 0,
+    "shanghaiTime": 0,
     "keplerTime": 0,
     "feynmanTime": 0,
     "feynmanFixTime": 0,
     "cancunTime": 0,
+    "haberTime": 0,
+    "haberFixTime": 0,
+    "bohrTime": 0,
     "parlia": {
       "period": 30,
       "epoch": 999999999
     },
     "blobSchedule": {
-    "cancun": {
-      "target": 3,
-      "max": 6,
-      "baseFeeUpdateFraction": 3338477
+      "cancun": {
+        "target": 3,
+        "max": 6,
+        "baseFeeUpdateFraction": 3338477
       }
     }
   },
@@ -55,9 +62,9 @@
     "27f3e5cebba574be9dbfa8b20874b9484fa5e22d": {
       "balance": "0x0"
     },
-      "109e21dd6E9Ba8f67D3A632B1B70fFD3E6ed24ad": {
-        "balance": "0x21e19e0c9bab2400000"
-      },
+    "109e21dd6E9Ba8f67D3A632B1B70fFD3E6ed24ad": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
     "EA3c9812afBE58Ace71063E217Dd28884938CA1a": {
       "balance": "0x21e19e0c9bab2400000"
     },
