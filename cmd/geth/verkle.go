@@ -114,7 +114,7 @@ func verifyVerkle(ctx *cli.Context) error {
 	stack, _ := makeConfigNode(ctx)
 	defer stack.Close()
 
-	chaindb := utils.MakeChainDatabase(ctx, stack, true, false)
+	chaindb := utils.MakeChainDatabase(ctx, stack, true)
 	defer chaindb.Close()
 	headBlock := rawdb.ReadHeadBlock(chaindb)
 	if headBlock == nil {
@@ -163,7 +163,7 @@ func expandVerkle(ctx *cli.Context) error {
 	stack, _ := makeConfigNode(ctx)
 	defer stack.Close()
 
-	chaindb := utils.MakeChainDatabase(ctx, stack, true, false)
+	chaindb := utils.MakeChainDatabase(ctx, stack, true)
 	defer chaindb.Close()
 	var (
 		rootC   common.Hash
@@ -201,7 +201,7 @@ func expandVerkle(ctx *cli.Context) error {
 	}
 
 	for i, key := range keylist {
-		log.Info("Reading key", "index", i, "key", keylist[0])
+		log.Info("Reading key", "index", i, "key", key)
 		root.Get(key, chaindb.Get)
 	}
 

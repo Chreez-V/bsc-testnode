@@ -23,13 +23,12 @@ import (
 )
 
 const (
-	GasLimitBoundDivisor uint64 = 256                // The bound divisor of the gas limit, used in update calculations.
+	GasLimitBoundDivisor uint64 = 1024               // The bound divisor of the gas limit, used in update calculations.
 	MinGasLimit          uint64 = 5000               // Minimum the gas limit may ever be.
 	MaxGasLimit          uint64 = 0x7fffffffffffffff // Maximum the gas limit (2^63-1).
 	GenesisGasLimit      uint64 = 4712388            // Gas limit of the Genesis block.
 	PayBidTxGasLimit     uint64 = 25000              // Gas limit of the PayBidTx in the types.BidArgs.
-
-	MaxMessageSize uint32 = 10 * 1024 * 1024 // MaxMessageSize is the maximum cap on the size of a eth protocol message.
+	MaxTxGas             uint64 = 1 << 24            // Maximum transaction gas limit after eip-7825 (16,777,216).
 
 	MaximumExtraDataSize  uint64 = 32       // Maximum size extra data may be after Genesis.
 	ForkIDSize            uint64 = 4        // The length of fork id
@@ -177,7 +176,7 @@ const (
 	Bls12381MapG1Gas          uint64 = 5500  // Gas price for BLS12-381 mapping field element to G1 operation
 	Bls12381MapG2Gas          uint64 = 23800 // Gas price for BLS12-381 mapping field element to G2 operation
 
-	P256VerifyGas uint64 = 3450 // secp256r1 elliptic curve signature verifier gas price
+	P256VerifyGas uint64 = 6900 // secp256r1 elliptic curve signature verifier gas price
 
 	// The Refund Quotient is the cap on how much of the used gas can be refunded. Before EIP-3529,
 	// up to half the consumed gas could be refunded. Redefined as 1/5th in EIP-3529
@@ -189,14 +188,23 @@ const (
 	BlobTxBlobGasPerBlob               = 1 << 17 // Gas consumption of a single data blob (== blob byte size)
 	BlobTxMinBlobGasprice              = 1       // Minimum gas price for data blobs
 	BlobTxPointEvaluationPrecompileGas = 50000   // Gas price for the point evaluation precompile.
+	BlobTxMaxBlobs                     = 6
+	BlobBaseCost                       = 1 << 13 // Base execution gas cost for a blob.
+	BlobEligibleBlockInterval          = 5       // BEP-657: Blob transactions are only allowed in blocks where N % 5 == 0
 
-	HistoryServeWindow = 8192 // Number of blocks to serve historical block hashes for, EIP-2935.
+	HistoryServeWindow = 8191 // Number of blocks to serve historical block hashes for, EIP-2935.
+
+	MaxBlockSize = 8_388_608 // maximum size of an RLP-encoded block
 )
 
 var (
-	MinBlocksForBlobRequests           uint64 = 524288              // it keeps blob data available for ~18.2 days in local, ref: https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP-336.md#51-parameters.
-	DefaultExtraReserveForBlobRequests uint64 = 1 * (24 * 3600) / 3 // it adds more time for expired blobs for some request cases, like expiry blob when remote peer is syncing, default 1 day.
-	BreatheBlockInterval               uint64 = 86400               // Controls the interval for updateValidatorSetV2
+	// fermiBlockInterval                        = 0.45
+	MinTimeDurationForBlobRequests     uint64 = uint64(float64(24*3600) * 18.2)                        // it keeps blob data available for 18.2 days in local
+	MinBlocksForBlobRequests           uint64 = uint64(float64(MinTimeDurationForBlobRequests) / 0.45) // ref: https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP-524.md#421-change-table.
+	DefaultExtraReserveForBlobRequests uint64 = uint64(24 * 3600 / 0.45)                               // it adds more time for expired blobs for some request cases, like expiry blob when remote peer is syncing, default 1 day.
+
+	BreatheBlockInterval uint64 = 24 * 3600 // Controls the interval for updateValidatorSetV2
+
 	// used for testing:
 	//     [1,9] except 2 --> used as turn length directly
 	//                  2 --> use random values to test switching turn length

@@ -57,10 +57,7 @@ func getData(data []byte, start uint64, size uint64) []byte {
 	if start > length {
 		start = length
 	}
-	end := start + size
-	if end > length {
-		end = length
-	}
+	end := min(start+size, length)
 	return common.RightPadBytes(data[start:end], int(size))
 }
 
@@ -69,10 +66,7 @@ func getDataAndAdjustedBounds(data []byte, start uint64, size uint64) (codeCopyP
 	if start > length {
 		start = length
 	}
-	end := start + size
-	if end > length {
-		end = length
-	}
+	end := min(start+size, length)
 	return common.RightPadBytes(data[start:end], int(size)), start, end - start
 }
 
@@ -83,13 +77,4 @@ func toWordSize(size uint64) uint64 {
 	}
 
 	return (size + 31) / 32
-}
-
-func allZero(b []byte) bool {
-	for _, byte := range b {
-		if byte != 0 {
-			return false
-		}
-	}
-	return true
 }

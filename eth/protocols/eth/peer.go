@@ -20,11 +20,16 @@ import (
 	"math/big"
 	"math/rand"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/p2p/tracker"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -58,11 +63,13 @@ const (
 
 // Peer is a collection of relevant information we have about a `eth` peer.
 type Peer struct {
+	*p2p.Peer // The embedded P2P package peer
+
 	id string // Unique ID for the peer, cached
 
-	*p2p.Peer                         // The embedded P2P package peer
 	rw              p2p.MsgReadWriter // Input/output streams for snap
 	version         uint              // Protocol version negotiated
+	lastRange       atomic.Pointer[BlockRangeUpdatePacket]
 	statusExtension *UpgradeStatusExtension
 
 	lagging bool        // lagging peer is still connected, but won't be used to sync.
@@ -78,6 +85,7 @@ type Peer struct {
 	txBroadcast chan []common.Hash // Channel used to queue transaction propagation requests
 	txAnnounce  chan []common.Hash // Channel used to queue transaction announcement requests
 
+	tracker     *tracker.Tracker
 	reqDispatch chan *request  // Dispatch channel to send requests and track then until fulfillment
 	reqCancel   chan *cancel   // Dispatch channel to cancel pending requests and untrack them
 	resDispatch chan *response // Dispatch channel to fulfil pending requests and untrack them
@@ -90,8 +98,10 @@ type Peer struct {
 // NewPeer creates a wrapper for a network connection and negotiated  protocol
 // version.
 func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool) *Peer {
+	cap := p2p.Cap{Name: ProtocolName, Version: version}
+	id := p.ID().String()
 	peer := &Peer{
-		id:              p.ID().String(),
+		id:              id,
 		Peer:            p,
 		rw:              rw,
 		version:         version,
@@ -101,6 +111,7 @@ func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool) *Pe
 		queuedBlockAnns: make(chan *types.Block, maxQueuedBlockAnns),
 		txBroadcast:     make(chan []common.Hash),
 		txAnnounce:      make(chan []common.Hash),
+		tracker:         tracker.New(cap, id, 5*time.Minute),
 		reqDispatch:     make(chan *request),
 		reqCancel:       make(chan *cancel),
 		resDispatch:     make(chan *response),
@@ -139,6 +150,11 @@ func (p *Peer) ID() string {
 	return p.id
 }
 
+// NodeID retrieves the peer's unique identifier.
+func (p *Peer) NodeID() enode.ID {
+	return p.Peer.ID()
+}
+
 // Version retrieves the peer's negotiated `eth` protocol version.
 func (p *Peer) Version() uint {
 	return p.version
@@ -175,6 +191,12 @@ func (p *Peer) KnownBlock(hash common.Hash) bool {
 	return p.knownBlocks.Contains(hash)
 }
 
+// BlockRange returns the latest announced block range.
+// This will be nil for peers below protocol version eth/69.
+func (p *Peer) BlockRange() *BlockRangeUpdatePacket {
+	return p.lastRange.Load()
+}
+
 // KnownTransaction returns whether peer is known to already have a transaction.
 func (p *Peer) KnownTransaction(hash common.Hash) bool {
 	return p.knownTxs.Contains(hash)
@@ -187,9 +209,9 @@ func (p *Peer) markBlock(hash common.Hash) {
 	p.knownBlocks.Add(hash)
 }
 
-// markTransaction marks a transaction as known for the peer, ensuring that it
+// MarkTransaction marks a transaction as known for the peer, ensuring that it
 // will never be propagated to this particular peer.
-func (p *Peer) markTransaction(hash common.Hash) {
+func (p *Peer) MarkTransaction(hash common.Hash) {
 	// If we reached the memory allowance, drop a previously known transaction hash
 	p.knownTxs.Add(hash)
 }
@@ -297,10 +319,23 @@ func (p *Peer) AsyncSendNewBlockHash(block *types.Block) {
 func (p *Peer) SendNewBlock(block *types.Block, td *big.Int) error {
 	// Mark all the block hash as known, but ensure we don't overflow our limits
 	p.knownBlocks.Add(block.Hash())
+	bal := block.BAL()
+	if !p.CanHandleBAL.Load() {
+		bal = nil
+	}
+	if bal != nil {
+		log.Debug("SendNewBlock", "number", block.NumberU64(), "hash", block.Hash(), "peer", p.ID(),
+			"balSize", block.BALSize(), "version", bal.Version, "canHandleBAL", p.CanHandleBAL.Load())
+	} else {
+		log.Debug("SendNewBlock no BAL", "number", block.NumberU64(), "hash", block.Hash(), "peer", p.ID(),
+			"txNum", len(block.Transactions()), "canHandleBAL", p.CanHandleBAL.Load())
+	}
+
 	return p2p.Send(p.rw, NewBlockMsg, &NewBlockPacket{
 		Block:    block,
 		TD:       td,
 		Sidecars: block.Sidecars(),
+		Bal:      bal,
 	})
 }
 
@@ -348,10 +383,11 @@ func (p *Peer) RequestOneHeader(hash common.Hash, sink chan *Response) (*Request
 	id := rand.Uint64()
 
 	req := &Request{
-		id:   id,
-		sink: sink,
-		code: GetBlockHeadersMsg,
-		want: BlockHeadersMsg,
+		id:       id,
+		sink:     sink,
+		code:     GetBlockHeadersMsg,
+		want:     BlockHeadersMsg,
+		numItems: 1,
 		data: &GetBlockHeadersPacket{
 			RequestId: id,
 			GetBlockHeadersRequest: &GetBlockHeadersRequest{
@@ -375,10 +411,11 @@ func (p *Peer) RequestHeadersByHash(origin common.Hash, amount int, skip int, re
 	id := rand.Uint64()
 
 	req := &Request{
-		id:   id,
-		sink: sink,
-		code: GetBlockHeadersMsg,
-		want: BlockHeadersMsg,
+		id:       id,
+		sink:     sink,
+		code:     GetBlockHeadersMsg,
+		want:     BlockHeadersMsg,
+		numItems: amount,
 		data: &GetBlockHeadersPacket{
 			RequestId: id,
 			GetBlockHeadersRequest: &GetBlockHeadersRequest{
@@ -402,10 +439,11 @@ func (p *Peer) RequestHeadersByNumber(origin uint64, amount int, skip int, rever
 	id := rand.Uint64()
 
 	req := &Request{
-		id:   id,
-		sink: sink,
-		code: GetBlockHeadersMsg,
-		want: BlockHeadersMsg,
+		id:       id,
+		sink:     sink,
+		code:     GetBlockHeadersMsg,
+		want:     BlockHeadersMsg,
+		numItems: amount,
 		data: &GetBlockHeadersPacket{
 			RequestId: id,
 			GetBlockHeadersRequest: &GetBlockHeadersRequest{
@@ -429,10 +467,11 @@ func (p *Peer) RequestBodies(hashes []common.Hash, sink chan *Response) (*Reques
 	id := rand.Uint64()
 
 	req := &Request{
-		id:   id,
-		sink: sink,
-		code: GetBlockBodiesMsg,
-		want: BlockBodiesMsg,
+		id:       id,
+		sink:     sink,
+		code:     GetBlockBodiesMsg,
+		want:     BlockBodiesMsg,
+		numItems: len(hashes),
 		data: &GetBlockBodiesPacket{
 			RequestId:             id,
 			GetBlockBodiesRequest: hashes,
@@ -450,10 +489,11 @@ func (p *Peer) RequestReceipts(hashes []common.Hash, sink chan *Response) (*Requ
 	id := rand.Uint64()
 
 	req := &Request{
-		id:   id,
-		sink: sink,
-		code: GetReceiptsMsg,
-		want: ReceiptsMsg,
+		id:       id,
+		sink:     sink,
+		code:     GetReceiptsMsg,
+		want:     ReceiptsMsg,
+		numItems: len(hashes),
 		data: &GetReceiptsPacket{
 			RequestId:          id,
 			GetReceiptsRequest: hashes,
@@ -470,11 +510,27 @@ func (p *Peer) RequestTxs(hashes []common.Hash) error {
 	p.Log().Debug("Fetching batch of transactions", "count", len(hashes))
 	id := rand.Uint64()
 
-	requestTracker.Track(p.id, p.version, GetPooledTransactionsMsg, PooledTransactionsMsg, id)
+	err := p.tracker.Track(tracker.Request{
+		ID:       id,
+		ReqCode:  GetPooledTransactionsMsg,
+		RespCode: PooledTransactionsMsg,
+		Size:     len(hashes),
+	})
+	if err != nil {
+		return err
+	}
 	return p2p.Send(p.rw, GetPooledTransactionsMsg, &GetPooledTransactionsPacket{
 		RequestId:                    id,
 		GetPooledTransactionsRequest: hashes,
 	})
+}
+
+// SendBlockRangeUpdate sends a notification about our available block range to the peer.
+func (p *Peer) SendBlockRangeUpdate(msg BlockRangeUpdatePacket) error {
+	if p.version < ETH69 {
+		return nil
+	}
+	return p2p.Send(p.rw, BlockRangeUpdateMsg, &msg)
 }
 
 // knownCache is a cache for known hashes.

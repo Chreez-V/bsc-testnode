@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/gopool"
 	"github.com/ethereum/go-ethereum/common/mclock"
+	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/p2p/enode"
@@ -55,9 +56,8 @@ const (
 	bucketIPLimit, bucketSubnet = 2, 24 // at most 2 addresses from the same /24
 	tableIPLimit, tableSubnet   = 10, 24
 
-	seedMinTableTime = 5 * time.Minute
-	seedCount        = 30
-	seedMaxAge       = 5 * 24 * time.Hour
+	seedCount  = 30
+	seedMaxAge = 5 * 24 * time.Hour
 )
 
 // Table is the 'node table', a Kademlia-like index of neighbor nodes. The table keeps
@@ -89,6 +89,7 @@ type Table struct {
 
 	enrFilter NodeFilterFunc
 
+	nodeFeed        event.FeedOf[*enode.Node]
 	nodeAddedHook   func(*bucket, *tableNode)
 	nodeRemovedHook func(*bucket, *tableNode)
 }
@@ -513,8 +514,9 @@ func (tab *Table) filterNode(n *enode.Node) bool {
 		return false
 	}
 	if node, err := tab.net.RequestENR(n); err != nil {
+		// If the ENR request fails, we assume the node is not valid, and try to add it to the table next time.
 		tab.log.Trace("ENR request failed", "id", n.ID(), "ipAddr", n.IPAddr(), "updPort", n.UDP(), "err", err)
-		return false
+		return true
 	} else if !tab.enrFilter(node.Record()) {
 		tab.log.Trace("ENR record filter out", "id", n.ID(), "ipAddr", n.IPAddr(), "updPort", n.UDP())
 		return true
@@ -560,6 +562,7 @@ func (tab *Table) handleAddNode(req addNodeOp) bool {
 		return false
 	}
 
+	tab.log.Trace("ENR record filter passed", "id", req.node.ID(), "ipAddr", req.node.IPAddr(), "updPort", req.node.UDP())
 	tab.mutex.Lock()
 	defer tab.mutex.Unlock()
 
@@ -617,11 +620,13 @@ func (tab *Table) addReplacement(b *bucket, n *enode.Node) {
 }
 
 func (tab *Table) nodeAdded(b *bucket, n *tableNode) {
-	if n.addedToTable == (time.Time{}) {
+	if n.addedToTable.IsZero() {
 		n.addedToTable = time.Now()
 	}
 	n.addedToBucket = time.Now()
 	tab.revalidation.nodeAdded(tab, n)
+
+	tab.nodeFeed.Send(n.Node)
 	if tab.nodeAddedHook != nil {
 		tab.nodeAddedHook(b, n)
 	}
@@ -747,4 +752,47 @@ func pushNode(list []*tableNode, n *tableNode, max int) ([]*tableNode, *tableNod
 	copy(list[1:], list)
 	list[0] = n
 	return list, removed
+}
+
+// deleteNode removes a node from the table.
+func (tab *Table) deleteNode(n *enode.Node) {
+	tab.mutex.Lock()
+	defer tab.mutex.Unlock()
+	b := tab.bucket(n.ID())
+	tab.deleteInBucket(b, n.ID())
+}
+
+// waitForNodes blocks until the table contains at least n nodes.
+func (tab *Table) waitForNodes(ctx context.Context, n int) error {
+	getlength := func() (count int) {
+		for _, b := range &tab.buckets {
+			count += len(b.entries)
+		}
+		return count
+	}
+
+	var ch chan *enode.Node
+	for {
+		tab.mutex.Lock()
+		if getlength() >= n {
+			tab.mutex.Unlock()
+			return nil
+		}
+		if ch == nil {
+			// Init subscription.
+			ch = make(chan *enode.Node)
+			sub := tab.nodeFeed.Subscribe(ch)
+			defer sub.Unsubscribe()
+		}
+		tab.mutex.Unlock()
+
+		// Wait for a node add event.
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tab.closeReq:
+			return errClosed
+		}
+	}
 }

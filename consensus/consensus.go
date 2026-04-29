@@ -27,7 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/rpc"
 )
 
 var (
@@ -40,9 +39,6 @@ type ChainHeaderReader interface {
 	// Config retrieves the blockchain's chain configuration.
 	Config() *params.ChainConfig
 
-	// GenesisHeader retrieves the chain's genesis block header.
-	GenesisHeader() *types.Header
-
 	// CurrentHeader retrieves the current header from the local chain.
 	CurrentHeader() *types.Header
 
@@ -54,6 +50,9 @@ type ChainHeaderReader interface {
 
 	// GetHeaderByHash retrieves a block header from the database by its hash.
 	GetHeaderByHash(hash common.Hash) *types.Header
+
+	// GenesisHeader retrieves the chain's genesis block header.
+	GenesisHeader() *types.Header
 
 	// GetTd retrieves the total difficulty from the database by hash and number.
 	GetTd(hash common.Hash, number uint64) *big.Int
@@ -69,7 +68,7 @@ type ChainHeaderReader interface {
 }
 
 type VotePool interface {
-	FetchVoteByBlockHash(blockHash common.Hash) []*types.VoteEnvelope
+	FetchVotesByBlockHash(targetBlockHash common.Hash, sourceBlockNum uint64) []*types.VoteEnvelope
 }
 
 // ChainReader defines a small collection of methods needed to access the local
@@ -137,12 +136,15 @@ type Engine interface {
 	// SealHash returns the hash of a block prior to it being sealed.
 	SealHash(header *types.Header) common.Hash
 
+	// SignBAL signs the BAL of the block
+	SignBAL(blockAccessList *types.BlockAccessListEncode) error
+
+	// VerifyBAL verifies the BAL of the block
+	VerifyBAL(block *types.Block, bal *types.BlockAccessListEncode) error
+
 	// CalcDifficulty is the difficulty adjustment algorithm. It returns the difficulty
 	// that a new block should have.
 	CalcDifficulty(chain ChainHeaderReader, time uint64, parent *types.Header) *big.Int
-
-	// APIs returns the RPC APIs this consensus engine provides.
-	APIs(chain ChainHeaderReader) []rpc.API
 
 	// Delay returns the max duration the miner can commit txs
 	Delay(chain ChainReader, header *types.Header, leftOver *time.Duration) *time.Duration
@@ -160,8 +162,8 @@ type PoSA interface {
 	IsLocalBlock(header *types.Header) bool
 	GetJustifiedNumberAndHash(chain ChainHeaderReader, headers []*types.Header) (uint64, common.Hash, error)
 	GetFinalizedHeader(chain ChainHeaderReader, header *types.Header) *types.Header
+	CheckFinalityAndNotify(chain ChainHeaderReader, targetBlockHash common.Hash, notifyFn func(finalizedHeader *types.Header))
 	VerifyVote(chain ChainHeaderReader, vote *types.VoteEnvelope) error
 	IsActiveValidatorAt(chain ChainHeaderReader, header *types.Header, checkVoteKeyFn func(bLSPublicKey *types.BLSPublicKey) bool) bool
-	BlockInterval() uint64
 	NextProposalBlock(chain ChainHeaderReader, header *types.Header, proposer common.Address) (uint64, uint64, error)
 }

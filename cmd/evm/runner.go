@@ -284,7 +284,8 @@ func runCmd(ctx *cli.Context) error {
 		BlobHashes:  blobHashes,
 		BlobBaseFee: blobBaseFee,
 		EVMConfig: vm.Config{
-			Tracer: tracer,
+			Tracer:                    tracer,
+			EnableOpcodeOptimizations: ctx.Bool(VMOpcodeOptimizeFlag.Name),
 		},
 	}
 
@@ -322,7 +323,7 @@ func runCmd(ctx *cli.Context) error {
 		}
 	} else {
 		if len(code) > 0 {
-			prestate.SetCode(receiver, code)
+			prestate.SetCode(receiver, code, tracing.CodeChangeUnspecified)
 		}
 		execFunc = func() ([]byte, uint64, error) {
 			// don't mutate the state!
@@ -336,7 +337,7 @@ func runCmd(ctx *cli.Context) error {
 	output, stats, err := timedExec(bench, execFunc)
 
 	if ctx.Bool(DumpFlag.Name) {
-		root, _, err := runtimeConfig.State.Commit(genesisConfig.Number, true, false)
+		root, err := runtimeConfig.State.Commit(genesisConfig.Number, true, false)
 		if err != nil {
 			fmt.Printf("Failed to commit changes %v\n", err)
 			return err

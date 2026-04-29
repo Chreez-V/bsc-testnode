@@ -29,11 +29,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/prque"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
+	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
-	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 const (
@@ -70,12 +70,12 @@ type fetchResult struct {
 	Header       *types.Header
 	Uncles       []*types.Header
 	Transactions types.Transactions
-	Receipts     types.Receipts
+	Receipts     rlp.RawValue
 	Withdrawals  types.Withdrawals
 	Sidecars     types.BlobSidecars
 }
 
-func newFetchResult(header *types.Header, fastSync bool, pid string) *fetchResult {
+func newFetchResult(header *types.Header, snapSync bool, pid string) *fetchResult {
 	item := &fetchResult{
 		Header: header,
 		pid:    pid,
@@ -85,8 +85,13 @@ func newFetchResult(header *types.Header, fastSync bool, pid string) *fetchResul
 	} else if header.WithdrawalsHash != nil {
 		item.Withdrawals = make(types.Withdrawals, 0)
 	}
-	if fastSync && !header.EmptyReceipts() {
-		item.pending.Store(item.pending.Load() | (1 << receiptType))
+	if snapSync {
+		if header.EmptyReceipts() {
+			// Ensure the receipts list is valid even if it isn't actively fetched.
+			item.Receipts = rlp.EmptyList
+		} else {
+			item.pending.Store(item.pending.Load() | (1 << receiptType))
+		}
 	}
 	return item
 }
@@ -305,12 +310,12 @@ func (q *queue) RetrieveHeaders() ([]*types.Header, []common.Hash, int) {
 
 // Schedule adds a set of headers for the download queue for scheduling, returning
 // the new headers encountered.
-func (q *queue) Schedule(headers []*types.Header, hashes []common.Hash, from uint64) []*types.Header {
+func (q *queue) Schedule(headers []*types.Header, hashes []common.Hash, from uint64) int {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
 	// Insert all the headers prioritised by the contained block number
-	inserts := make([]*types.Header, 0, len(headers))
+	var inserts int
 	for i, header := range headers {
 		// Make sure chain order is honoured and preserved throughout
 		hash := hashes[i]
@@ -340,7 +345,7 @@ func (q *queue) Schedule(headers []*types.Header, hashes []common.Hash, from uin
 				q.receiptTaskQueue.Push(header, -int64(header.Number.Uint64()))
 			}
 		}
-		inserts = append(inserts, header)
+		inserts++
 		q.headerHead = hash
 		from++
 	}
@@ -383,9 +388,7 @@ func (q *queue) Results(block bool) []*fetchResult {
 		for _, uncle := range result.Uncles {
 			size += uncle.Size()
 		}
-		for _, receipt := range result.Receipts {
-			size += receipt.Size()
-		}
+		size += common.StorageSize(len(result.Receipts))
 		for _, tx := range result.Transactions {
 			size += common.StorageSize(tx.Size())
 		}
@@ -393,7 +396,7 @@ func (q *queue) Results(block bool) []*fetchResult {
 		q.resultSize = common.StorageSize(blockCacheSizeWeight)*size +
 			(1-common.StorageSize(blockCacheSizeWeight))*q.resultSize
 	}
-	// Using the newly calibrated resultsize, figure out the new throttle limit
+	// Using the newly calibrated result size, figure out the new throttle limit
 	// on the result cache
 	throttleThreshold := uint64((common.StorageSize(blockCacheMemory) + q.resultSize - 1) / q.resultSize)
 	throttleThreshold = q.resultCache.SetThrottleThreshold(throttleThreshold)
@@ -786,73 +789,69 @@ func (q *queue) DeliverHeaders(id string, headers []*types.Header, hashes []comm
 // DeliverBodies injects a block body retrieval response into the results queue.
 // The method returns the number of blocks bodies accepted from the delivery and
 // also wakes any threads waiting for data delivery.
-func (q *queue) DeliverBodies(id string, txLists [][]*types.Transaction, txListHashes []common.Hash,
-	uncleLists [][]*types.Header, uncleListHashes []common.Hash,
-	withdrawalLists [][]*types.Withdrawal, withdrawalListHashes []common.Hash, sidecars []types.BlobSidecars,
-) (int, error) {
+func (q *queue) DeliverBodies(id string, hashes eth.BlockBodyHashes, bodies []eth.BlockBody) (int, error) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
+	var txLists [][]*types.Transaction
+	var uncleLists [][]*types.Header
+	var withdrawalLists [][]*types.Withdrawal
+	var sidecarLists []types.BlobSidecars
+
 	validate := func(index int, header *types.Header) error {
-		if txListHashes[index] != header.TxHash {
+		if hashes.TransactionRoots[index] != header.TxHash {
 			return errInvalidBody
 		}
-		if uncleListHashes[index] != header.UncleHash {
+		if hashes.UncleHashes[index] != header.UncleHash {
 			return errInvalidBody
 		}
 		if header.WithdrawalsHash == nil {
 			// nil hash means that withdrawals should not be present in body
-			if withdrawalLists[index] != nil {
+			if bodies[index].Withdrawals != nil {
 				return errInvalidBody
 			}
 		} else { // non-nil hash: body must have withdrawals
-			if withdrawalLists[index] == nil {
+			if bodies[index].Withdrawals == nil {
 				return errInvalidBody
 			}
-			if withdrawalListHashes[index] != *header.WithdrawalsHash {
+			if hashes.WithdrawalRoots[index] != *header.WithdrawalsHash {
 				return errInvalidBody
 			}
 		}
-		// Blocks must have a number of blobs corresponding to the header gas usage,
-		// and zero before the Cancun hardfork.
-		var blobs int
-		for _, tx := range txLists[index] {
-			// Count the number of blobs to validate against the header's blobGasUsed
-			blobs += len(tx.BlobHashes())
 
-			// Validate the data blobs individually too
-			if tx.Type() == types.BlobTxType {
-				if len(tx.BlobHashes()) == 0 {
-					return errInvalidBody
-				}
-				for _, hash := range tx.BlobHashes() {
-					if !kzg4844.IsValidVersionedHash(hash[:]) {
-						return errInvalidBody
-					}
-				}
-				if tx.BlobTxSidecar() != nil {
-					return errInvalidBody
-				}
-			}
+		// decode
+		txs, err := bodies[index].Transactions.Items()
+		if err != nil {
+			return fmt.Errorf("%w: bad transactions: %v", errInvalidBody, err)
 		}
-		if header.BlobGasUsed != nil {
-			if want := *header.BlobGasUsed / params.BlobTxBlobGasPerBlob; uint64(blobs) != want { // div because the header is surely good vs the body might be bloated
-				return errInvalidBody
+		txLists = append(txLists, txs)
+		uncles, err := bodies[index].Uncles.Items()
+		if err != nil {
+			return fmt.Errorf("%w: bad uncles: %v", errInvalidBody, err)
+		}
+		uncleLists = append(uncleLists, uncles)
+		if bodies[index].Withdrawals != nil {
+			withdrawals, err := bodies[index].Withdrawals.Items()
+			if err != nil {
+				return fmt.Errorf("%w: bad withdrawals: %v", errInvalidBody, err)
 			}
-			if blobs > params.MaxBlobsPerBlockForBSC {
-				return errInvalidBody
-			}
+			withdrawalLists = append(withdrawalLists, withdrawals)
 		} else {
-			if blobs != 0 {
-				return errInvalidBody
-			}
+			withdrawalLists = append(withdrawalLists, nil)
 		}
-
-		// do some sanity check for sidecar
-		for _, sidecar := range sidecars[index] {
-			if err := sidecar.SanityCheck(header.Number, header.Hash()); err != nil {
-				return err
+		if bodies[index].Sidecars != nil {
+			sidecars, err := bodies[index].Sidecars.Items()
+			if err != nil {
+				return fmt.Errorf("%w: bad sidecars: %v", errInvalidBody, err)
 			}
+			for _, sidecar := range sidecars {
+				if err := sidecar.SanityCheck(header.Number, header.Hash()); err != nil {
+					return err
+				}
+			}
+			sidecarLists = append(sidecarLists, sidecars)
+		} else {
+			sidecarLists = append(sidecarLists, nil)
 		}
 		return nil
 	}
@@ -861,17 +860,18 @@ func (q *queue) DeliverBodies(id string, txLists [][]*types.Transaction, txListH
 		result.Transactions = txLists[index]
 		result.Uncles = uncleLists[index]
 		result.Withdrawals = withdrawalLists[index]
-		result.Sidecars = sidecars[index]
+		result.Sidecars = sidecarLists[index]
 		result.SetBodyDone()
 	}
+	nresults := len(hashes.TransactionRoots)
 	return q.deliver(id, q.blockTaskPool, q.blockTaskQueue, q.blockPendPool,
-		bodyReqTimer, bodyInMeter, bodyDropMeter, len(txLists), validate, reconstruct)
+		bodyReqTimer, bodyInMeter, bodyDropMeter, nresults, validate, reconstruct)
 }
 
 // DeliverReceipts injects a receipt retrieval response into the results queue.
 // The method returns the number of transaction receipts accepted from the delivery
 // and also wakes any threads waiting for data delivery.
-func (q *queue) DeliverReceipts(id string, receiptList [][]*types.Receipt, receiptListHashes []common.Hash) (int, error) {
+func (q *queue) DeliverReceipts(id string, receiptList []rlp.RawValue, receiptListHashes []common.Hash) (int, error) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 

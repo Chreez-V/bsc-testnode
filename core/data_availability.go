@@ -60,19 +60,24 @@ func IsDataAvailable(chain consensus.ChainHeaderReader, block *types.Block) (err
 
 	// refer logic in ValidateBody
 	if !chain.Config().IsCancun(block.Number(), block.Time()) {
-		if block.Sidecars() != nil {
+		if len(block.Sidecars()) != 0 {
 			return errors.New("sidecars present in block body before cancun")
 		}
 		return nil
 	}
 
-	// only required to check within MinBlocksForBlobRequests block's DA
+	// Only trusted heads may decide whether recent blob data can be discarded.
+	// ChasingHead is populated from remote peer sync state, so future values must
+	// never be allowed to suppress DA checks.
 	highest := chain.ChasingHead()
 	current := chain.CurrentHeader()
-	if highest == nil || highest.Number.Cmp(current.Number) < 0 {
+	now := uint64(time.Now().Unix())
+	if highest == nil || highest.Number == nil || highest.Time > now {
+		highest = current
+	} else if current != nil && current.Number != nil && highest.Number.Cmp(current.Number) < 0 {
 		highest = current
 	}
-	if block.NumberU64()+params.MinBlocksForBlobRequests < highest.Number.Uint64() {
+	if block.Time()+params.MinTimeDurationForBlobRequests < highest.Time {
 		// if we needn't check DA of this block, just clean it
 		block.CleanSidecars()
 		return nil

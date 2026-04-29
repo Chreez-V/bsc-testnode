@@ -19,7 +19,6 @@ package downloader
 import (
 	"fmt"
 	"math/big"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,7 +31,6 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/event"
@@ -44,7 +42,6 @@ import (
 
 // downloadTester is a test simulator for mocking out local block chain.
 type downloadTester struct {
-	freezer    string
 	chain      *core.BlockChain
 	downloader *Downloader
 
@@ -59,8 +56,7 @@ func newTester(t *testing.T) *downloadTester {
 
 // newTesterWithNotification creates a new downloader test mocker.
 func newTesterWithNotification(t *testing.T, success func()) *downloadTester {
-	freezer := t.TempDir()
-	db, err := rawdb.NewDatabaseWithFreezer(rawdb.NewMemoryDatabase(), freezer, "", false, false, false, false, false)
+	db, err := rawdb.Open(rawdb.NewMemoryDatabase(), rawdb.OpenOptions{})
 	if err != nil {
 		panic(err)
 	}
@@ -72,14 +68,13 @@ func newTesterWithNotification(t *testing.T, success func()) *downloadTester {
 		Alloc:   types.GenesisAlloc{testAddress: {Balance: big.NewInt(1000000000000000)}},
 		BaseFee: big.NewInt(params.InitialBaseFee),
 	}
-	chain, err := core.NewBlockChain(db, nil, gspec, nil, ethash.NewFaker(), vm.Config{}, nil, nil)
+	chain, err := core.NewBlockChain(db, gspec, ethash.NewFaker(), nil)
 	if err != nil {
 		panic(err)
 	}
 	tester := &downloadTester{
-		freezer: freezer,
-		chain:   chain,
-		peers:   make(map[string]*downloadTesterPeer),
+		chain: chain,
+		peers: make(map[string]*downloadTesterPeer),
 	}
 	tester.downloader = New(db, new(event.TypeMux), tester.chain, tester.dropPeer, success)
 	return tester
@@ -90,8 +85,6 @@ func newTesterWithNotification(t *testing.T, success func()) *downloadTester {
 func (dl *downloadTester) terminate() {
 	dl.downloader.Terminate()
 	dl.chain.Stop()
-
-	os.RemoveAll(dl.freezer)
 }
 
 // sync starts synchronizing with a remote peer, blocking until it completes.
@@ -269,10 +262,12 @@ func (dlp *downloadTesterPeer) RequestHeadersByNumber(origin uint64, amount int,
 func (dlp *downloadTesterPeer) RequestBodies(hashes []common.Hash, sink chan *eth.Response) (*eth.Request, error) {
 	blobs := eth.ServiceGetBlockBodiesQuery(dlp.chain, hashes)
 
-	bodies := make([]*eth.BlockBody, len(blobs))
+	bodies := make([]*types.Body, len(blobs))
+	ethbodies := make([]eth.BlockBody, len(blobs))
 	for i, blob := range blobs {
-		bodies[i] = new(eth.BlockBody)
+		bodies[i] = new(types.Body)
 		rlp.DecodeBytes(blob, bodies[i])
+		rlp.DecodeBytes(blob, &ethbodies[i])
 	}
 	var (
 		txsHashes        = make([]common.Hash, len(bodies))
@@ -288,9 +283,13 @@ func (dlp *downloadTesterPeer) RequestBodies(hashes []common.Hash, sink chan *et
 		Peer: dlp.id,
 	}
 	res := &eth.Response{
-		Req:  req,
-		Res:  (*eth.BlockBodiesResponse)(&bodies),
-		Meta: [][]common.Hash{txsHashes, uncleHashes, withdrawalHashes},
+		Req: req,
+		Res: (*eth.BlockBodiesResponse)(&ethbodies),
+		Meta: eth.BlockBodyHashes{
+			TransactionRoots: txsHashes,
+			UncleHashes:      uncleHashes,
+			WithdrawalRoots:  withdrawalHashes,
+		},
 		Time: 1,
 		Done: make(chan error, 1), // Ignore the returned status
 	}
@@ -304,23 +303,24 @@ func (dlp *downloadTesterPeer) RequestBodies(hashes []common.Hash, sink chan *et
 // peer in the download tester. The returned function can be used to retrieve
 // batches of block receipts from the particularly requested peer.
 func (dlp *downloadTesterPeer) RequestReceipts(hashes []common.Hash, sink chan *eth.Response) (*eth.Request, error) {
-	blobs := eth.ServiceGetReceiptsQuery(dlp.chain, hashes)
+	blobs := eth.ServiceGetReceiptsQuery68(dlp.chain, hashes)
 
-	receipts := make([][]*types.Receipt, len(blobs))
+	receipts := make([]types.Receipts, len(blobs))
 	for i, blob := range blobs {
 		rlp.DecodeBytes(blob, &receipts[i])
 	}
 	hasher := trie.NewStackTrie(nil)
 	hashes = make([]common.Hash, len(receipts))
 	for i, receipt := range receipts {
-		hashes[i] = types.DeriveSha(types.Receipts(receipt), hasher)
+		hashes[i] = types.DeriveSha(receipt, hasher)
 	}
 	req := &eth.Request{
 		Peer: dlp.id,
 	}
+	resp := eth.ReceiptsRLPResponse(types.EncodeBlockReceiptLists(receipts))
 	res := &eth.Response{
 		Req:  req,
-		Res:  (*eth.ReceiptsResponse)(&receipts),
+		Res:  &resp,
 		Meta: hashes,
 		Time: 1,
 		Done: make(chan error, 1), // Ignore the returned status
@@ -338,14 +338,14 @@ func (dlp *downloadTesterPeer) ID() string {
 
 // RequestAccountRange fetches a batch of accounts rooted in a specific account
 // trie, starting with the origin.
-func (dlp *downloadTesterPeer) RequestAccountRange(id uint64, root, origin, limit common.Hash, bytes uint64) error {
+func (dlp *downloadTesterPeer) RequestAccountRange(id uint64, root, origin, limit common.Hash, bytes int) error {
 	// Create the request and service it
 	req := &snap.GetAccountRangePacket{
 		ID:     id,
 		Root:   root,
 		Origin: origin,
 		Limit:  limit,
-		Bytes:  bytes,
+		Bytes:  uint64(bytes),
 	}
 	slimaccs, proofs := snap.ServiceGetAccountRangeQuery(dlp.chain, req)
 
@@ -364,7 +364,7 @@ func (dlp *downloadTesterPeer) RequestAccountRange(id uint64, root, origin, limi
 // RequestStorageRanges fetches a batch of storage slots belonging to one or
 // more accounts. If slots from only one account is requested, an origin marker
 // may also be used to retrieve from there.
-func (dlp *downloadTesterPeer) RequestStorageRanges(id uint64, root common.Hash, accounts []common.Hash, origin, limit []byte, bytes uint64) error {
+func (dlp *downloadTesterPeer) RequestStorageRanges(id uint64, root common.Hash, accounts []common.Hash, origin, limit []byte, bytes int) error {
 	// Create the request and service it
 	req := &snap.GetStorageRangesPacket{
 		ID:       id,
@@ -372,7 +372,7 @@ func (dlp *downloadTesterPeer) RequestStorageRanges(id uint64, root common.Hash,
 		Root:     root,
 		Origin:   origin,
 		Limit:    limit,
-		Bytes:    bytes,
+		Bytes:    uint64(bytes),
 	}
 	storage, proofs := snap.ServiceGetStorageRangesQuery(dlp.chain, req)
 
@@ -389,25 +389,28 @@ func (dlp *downloadTesterPeer) RequestStorageRanges(id uint64, root common.Hash,
 }
 
 // RequestByteCodes fetches a batch of bytecodes by hash.
-func (dlp *downloadTesterPeer) RequestByteCodes(id uint64, hashes []common.Hash, bytes uint64) error {
+func (dlp *downloadTesterPeer) RequestByteCodes(id uint64, hashes []common.Hash, bytes int) error {
 	req := &snap.GetByteCodesPacket{
 		ID:     id,
 		Hashes: hashes,
-		Bytes:  bytes,
+		Bytes:  uint64(bytes),
 	}
 	codes := snap.ServiceGetByteCodesQuery(dlp.chain, req)
 	go dlp.dl.downloader.SnapSyncer.OnByteCodes(dlp, id, codes)
 	return nil
 }
 
-// RequestTrieNodes fetches a batch of account or storage trie nodes rooted in
-// a specific state trie.
-func (dlp *downloadTesterPeer) RequestTrieNodes(id uint64, root common.Hash, paths []snap.TrieNodePathSet, bytes uint64) error {
+// RequestTrieNodes fetches a batch of account or storage trie nodes.
+func (dlp *downloadTesterPeer) RequestTrieNodes(id uint64, root common.Hash, count int, paths []snap.TrieNodePathSet, bytes int) error {
+	encPaths, err := rlp.EncodeToRawList(paths)
+	if err != nil {
+		panic(err)
+	}
 	req := &snap.GetTrieNodesPacket{
 		ID:    id,
 		Root:  root,
-		Paths: paths,
-		Bytes: bytes,
+		Paths: encPaths,
+		Bytes: uint64(bytes),
 	}
 	nodes, _ := snap.ServiceGetTrieNodesQuery(dlp.chain, req, time.Now())
 	go dlp.dl.downloader.SnapSyncer.OnTrieNodes(dlp, id, nodes)

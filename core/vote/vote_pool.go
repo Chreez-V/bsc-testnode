@@ -3,6 +3,7 @@ package vote
 import (
 	"container/heap"
 	"sync"
+	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 
@@ -25,6 +26,8 @@ const (
 	upperLimitOfVoteBlockNumber = 11 // refer to fetcher.maxUncleDist
 
 	highestVerifiedBlockChanSize = 10 // highestVerifiedBlockChanSize is the size of channel listening to HighestVerifiedBlockEvent.
+
+	defaultMajorityThreshold = 14 // this is an inaccurate value, mainly used for metric acquisition, ref parlia.verifyVoteAttestation
 )
 
 var (
@@ -39,7 +42,21 @@ var (
 
 type VoteBox struct {
 	blockNumber  uint64
+	blockHash    common.Hash
 	voteMessages []*types.VoteEnvelope
+}
+
+func (v *VoteBox) trySetRecvVoteTime(chain *core.BlockChain) {
+	stats := chain.GetBlockStats(v.blockHash)
+	if len(v.voteMessages) == 1 {
+		stats.FirstRecvVoteTime.Store(time.Now().UnixMilli())
+	}
+	if stats.RecvMajorityVoteTime.Load() > 0 {
+		return
+	}
+	if len(v.voteMessages) >= defaultMajorityThreshold {
+		stats.RecvMajorityVoteTime.Store(time.Now().UnixMilli())
+	}
 }
 
 type VotePool struct {
@@ -184,6 +201,7 @@ func (pool *VotePool) putVote(m map[common.Hash]*VoteBox, votesPq *votesPriority
 		heap.Push(votesPq, voteData)
 		voteBox := &VoteBox{
 			blockNumber:  targetNumber,
+			blockHash:    targetHash,
 			voteMessages: make([]*types.VoteEnvelope, 0, maxFutureVoteAmountPerBlock),
 		}
 		m[targetHash] = voteBox
@@ -197,6 +215,7 @@ func (pool *VotePool) putVote(m map[common.Hash]*VoteBox, votesPq *votesPriority
 
 	// Put into corresponding votes map.
 	m[targetHash].voteMessages = append(m[targetHash].voteMessages, vote)
+	m[targetHash].trySetRecvVoteTime(pool.chain)
 	// Add into received vote to avoid future duplicated vote comes.
 	pool.receivedVotes.Add(voteHash)
 	log.Debug("VoteHash put into votepool is:", "voteHash", voteHash)
@@ -205,6 +224,10 @@ func (pool *VotePool) putVote(m map[common.Hash]*VoteBox, votesPq *votesPriority
 		localFutureVotesCounter.Inc(1)
 	} else {
 		localCurVotesCounter.Inc(1)
+		// Skip if target block is already finalized and notified
+		if highestNotified := pool.chain.HighestNotifiedFinal(); highestNotified == nil || targetNumber > highestNotified.Number.Uint64()+1 {
+			go pool.engine.CheckFinalityAndNotify(pool.chain, targetHash, pool.chain.NotifyFinalized)
+		}
 	}
 	localReceivedVotesGauge.Update(int64(pool.receivedVotes.Cardinality()))
 }
@@ -269,7 +292,11 @@ func (pool *VotePool) transfer(blockHash common.Hash) {
 	// may len(curVotes[blockHash].voteMessages) extra maxCurVoteAmountPerBlock, but it doesn't matter
 	if _, ok := curVotes[blockHash]; !ok {
 		heap.Push(curPq, voteData)
-		curVotes[blockHash] = &VoteBox{voteBox.blockNumber, validVotes}
+		curVotes[blockHash] = &VoteBox{
+			blockNumber:  voteBox.blockNumber,
+			blockHash:    voteBox.blockHash,
+			voteMessages: validVotes,
+		}
 		localCurVotesPqGauge.Update(int64(curPq.Len()))
 	} else {
 		curVotes[blockHash].voteMessages = append(curVotes[blockHash].voteMessages, validVotes...)
@@ -279,6 +306,9 @@ func (pool *VotePool) transfer(blockHash common.Hash) {
 
 	localCurVotesCounter.Inc(int64(len(validVotes)))
 	localFutureVotesCounter.Dec(int64(len(voteBox.voteMessages)))
+
+	// Use goroutine to avoid deadlock (see putVote for details).
+	go pool.engine.CheckFinalityAndNotify(pool.chain, blockHash, pool.chain.NotifyFinalized)
 }
 
 // Prune old data of duplicationSet, curVotePq and curVotesMap.
@@ -322,11 +352,17 @@ func (pool *VotePool) GetVotes() []*types.VoteEnvelope {
 	return votesRes
 }
 
-func (pool *VotePool) FetchVoteByBlockHash(blockHash common.Hash) []*types.VoteEnvelope {
+func (pool *VotePool) FetchVotesByBlockHash(targetBlockHash common.Hash, sourceBlockNum uint64) []*types.VoteEnvelope {
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
-	if _, ok := pool.curVotes[blockHash]; ok {
-		return pool.curVotes[blockHash].voteMessages
+	if voteBox, ok := pool.curVotes[targetBlockHash]; ok {
+		var res []*types.VoteEnvelope
+		for _, vote := range voteBox.voteMessages {
+			if vote.Data.SourceNumber == sourceBlockNum {
+				res = append(res, vote)
+			}
+		}
+		return res
 	}
 	return nil
 }

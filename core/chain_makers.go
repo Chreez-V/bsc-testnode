@@ -128,7 +128,7 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 	}
 	// Merge the tx-local access event into the "block-local" one, in order to collect
 	// all values, so that the witness can be built.
-	if b.statedb.GetTrie().IsVerkle() {
+	if b.statedb.Database().TrieDB().IsVerkle() {
 		b.statedb.AccessEvents().Merge(evm.AccessEvents)
 	}
 	b.txs = append(b.txs, tx)
@@ -262,7 +262,7 @@ func (b *BlockGen) AddUncle(h *types.Header) {
 	h.GasLimit = parent.GasLimit
 	if b.cm.config.IsLondon(h.Number) {
 		h.BaseFee = eip1559.CalcBaseFee(b.cm.config, parent)
-		if b.cm.config.Parlia == nil && !b.cm.config.IsLondon(parent.Number) {
+		if b.cm.config.IsNotInBSC() && !b.cm.config.IsLondon(parent.Number) {
 			parentGasLimit := parent.GasLimit * b.cm.config.ElasticityMultiplier()
 			h.GasLimit = CalcGasLimit(parentGasLimit, parentGasLimit)
 		}
@@ -336,7 +336,7 @@ func (b *BlockGen) collectRequests(readonly bool) (requests [][]byte) {
 		statedb = statedb.Copy()
 	}
 
-	if b.cm.config.IsPrague(b.header.Number, b.header.Time) && b.cm.config.Parlia == nil {
+	if b.cm.config.IsPrague(b.header.Number, b.header.Time) && b.cm.config.IsNotInBSC() {
 		requests = [][]byte{}
 		// EIP-6110 deposits
 		var blockLogs []*types.Log
@@ -350,9 +350,13 @@ func (b *BlockGen) collectRequests(readonly bool) (requests [][]byte) {
 		blockContext := NewEVMBlockContext(b.header, b.cm, &b.header.Coinbase)
 		evm := vm.NewEVM(blockContext, statedb, b.cm.config, vm.Config{})
 		// EIP-7002
-		ProcessWithdrawalQueue(&requests, evm)
+		if err := ProcessWithdrawalQueue(&requests, evm); err != nil {
+			panic(fmt.Sprintf("could not process withdrawal requests: %v", err))
+		}
 		// EIP-7251
-		ProcessConsolidationQueue(&requests, evm)
+		if err := ProcessConsolidationQueue(&requests, evm); err != nil {
+			panic(fmt.Sprintf("could not process consolidation requests: %v", err))
+		}
 	}
 	return requests
 }
@@ -445,7 +449,7 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		}
 
 		// Write state changes to db
-		root, _, err := statedb.Commit(b.header.Number.Uint64(), config.IsEIP158(b.header.Number), config.IsCancun(b.header.Number, b.header.Time))
+		root, err := statedb.Commit(b.header.Number.Uint64(), config.IsEIP158(b.header.Number), config.IsCancun(b.header.Number, b.header.Time))
 		if err != nil {
 			panic(fmt.Sprintf("state write error: %v", err))
 		}
@@ -537,6 +541,13 @@ func GenerateVerkleChain(config *params.ChainConfig, parent *types.Block, engine
 		if gen != nil {
 			gen(i, b)
 		}
+
+		requests := b.collectRequests(false)
+		if requests != nil {
+			reqHash := types.CalcRequestsHash(requests)
+			b.header.RequestsHash = &reqHash
+		}
+
 		body := &types.Body{
 			Transactions: b.txs,
 			Uncles:       b.uncles,
@@ -548,7 +559,7 @@ func GenerateVerkleChain(config *params.ChainConfig, parent *types.Block, engine
 		}
 
 		// Write state changes to DB.
-		root, _, err := statedb.Commit(b.header.Number.Uint64(), config.IsEIP158(b.header.Number), config.IsCancun(b.header.Number, b.header.Time))
+		root, err := statedb.Commit(b.header.Number.Uint64(), config.IsEIP158(b.header.Number), config.IsCancun(b.header.Number, b.header.Time))
 		if err != nil {
 			panic(fmt.Sprintf("state write error: %v", err))
 		}
@@ -562,8 +573,10 @@ func GenerateVerkleChain(config *params.ChainConfig, parent *types.Block, engine
 		return block, b.receipts
 	}
 
+	sdb := state.NewDatabase(trdb, nil)
+
 	for i := 0; i < n; i++ {
-		statedb, err := state.New(parent.Root(), state.NewDatabase(trdb, nil))
+		statedb, err := state.New(parent.Root(), sdb)
 		if err != nil {
 			panic(err)
 		}
@@ -601,7 +614,7 @@ func GenerateVerkleChain(config *params.ChainConfig, parent *types.Block, engine
 
 func GenerateVerkleChainWithGenesis(genesis *Genesis, engine consensus.Engine, n int, gen func(int, *BlockGen)) (common.Hash, ethdb.Database, []*types.Block, []types.Receipts, []*verkle.VerkleProof, []verkle.StateDiff) {
 	db := rawdb.NewMemoryDatabase()
-	cacheConfig := DefaultCacheConfigWithScheme(rawdb.PathScheme)
+	cacheConfig := DefaultConfig().WithStateScheme(rawdb.PathScheme)
 	cacheConfig.SnapshotLimit = 0
 	triedb := triedb.NewDatabase(db, cacheConfig.triedbConfig(true))
 	defer triedb.Close()
@@ -628,7 +641,7 @@ func (cm *chainMaker) makeHeader(parent *types.Block, state *state.StateDB, engi
 
 	if cm.config.IsLondon(header.Number) {
 		header.BaseFee = eip1559.CalcBaseFee(cm.config, parentHeader)
-		if cm.config.Parlia == nil && !cm.config.IsLondon(parent.Number()) {
+		if cm.config.IsNotInBSC() && !cm.config.IsLondon(parent.Number()) {
 			parentGasLimit := parent.GasLimit() * cm.config.ElasticityMultiplier()
 			header.GasLimit = CalcGasLimit(parentGasLimit, parentGasLimit)
 		}
@@ -637,7 +650,7 @@ func (cm *chainMaker) makeHeader(parent *types.Block, state *state.StateDB, engi
 		excessBlobGas := eip4844.CalcExcessBlobGas(cm.config, parentHeader, time)
 		header.ExcessBlobGas = &excessBlobGas
 		header.BlobGasUsed = new(uint64)
-		if cm.config.Parlia == nil {
+		if cm.config.IsNotInBSC() {
 			header.ParentBeaconRoot = new(common.Hash)
 		} else {
 			header.WithdrawalsHash = &types.EmptyWithdrawalsHash

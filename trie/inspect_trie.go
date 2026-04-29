@@ -32,6 +32,7 @@ type Database interface {
 }
 
 const TopN = 3
+const DEFAULT_TRIEDBCACHE_SIZE = 1024 * 1024 * 1024
 
 type Inspector struct {
 	trie           *Trie // traverse trie
@@ -257,7 +258,7 @@ func (s *Inspector) traversal(trie *Trie, ts *trieStat, n node, height int, path
 		if err != nil {
 			panic(err)
 		}
-		contractTrie.tracer.reset()
+		contractTrie.opTracer.reset()
 
 		if s.sem.TryAcquire(1) {
 			s.wg.Add(1)

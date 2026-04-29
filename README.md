@@ -2,11 +2,12 @@
 
 The goal of BNB Smart Chain is to bring programmability and interoperability to BNB Beacon Chain. In order to embrace the existing popular community and advanced technology, it will bring huge benefits by staying compatible with all the existing smart contracts on Ethereum and Ethereum tooling. And to achieve that, the easiest solution is to develop based on go-ethereum fork, as we respect the great work of Ethereum very much.
 
-BNB Smart Chain starts its development based on go-ethereum fork. So you may see many toolings, binaries and also docs are based on Ethereum ones, such as the name “geth”.
+BNB Smart Chain starts its development based on go-ethereum fork. So you may see many toolings, binaries and also docs are based on Ethereum ones, such as the name "geth".
 
 [![API Reference](
 https://pkg.go.dev/badge/github.com/ethereum/go-ethereum
 )](https://pkg.go.dev/github.com/ethereum/go-ethereum?tab=doc)
+[![Build Test](https://github.com/bnb-chain/bsc/actions/workflows/build-test.yml/badge.svg)](https://github.com/bnb-chain/bsc/actions)
 [![Discord](https://img.shields.io/badge/discord-join%20chat-blue.svg)](https://discord.gg/z2VpC455eU)
 
 But from that baseline of EVM compatible, BNB Smart Chain introduces a system of 21 validators with Proof of Staked Authority (PoSA) consensus that can support short block time and lower fees. The most bonded validator candidates of staking will become validators and produce blocks. The double-sign detection and other slashing logic guarantee security, stability, and chain finality.
@@ -18,6 +19,13 @@ But from that baseline of EVM compatible, BNB Smart Chain introduces a system of
 - **Distributed with on-chain governance**: Proof of Staked Authority brings in decentralization and community participants. As the native token, BNB will serve as both the gas of smart contract execution and tokens for staking.
 
 More details in [White Paper](https://github.com/bnb-chain/whitepaper/blob/master/WHITEPAPER.md).
+
+## Release Types
+There are three types of release, each with a clear purpose and version scheme:
+
+- **1.Stable Release**: production-ready builds for the vast majority of users.  Format: `v<Major>.<Minor>.<Patch>`, example: [v1.5.19](https://github.com/bnb-chain/bsc/releases/tag/v1.5.19).
+- **2.Feature Release**: early access to a single feature without affecting the core product. Format: `v<Major>.<Minor>.<Patch>-feature-<FeatureName>`, example: [v1.5.19-feature-SI](https://github.com/bnb-chain/bsc/releases/tag/v1.5.19-feature-SI).
+- **3.Preview Release**: bleeding-edge builds for users who want the latest code. Format: `v<Major>.<Minor>.<Patch>-<Meta>`, Meta values indicate maturity: alpha (experimental), beta (largely complete), rc (release candidate), example: [v1.5.0-alpha](https://github.com/bnb-chain/bsc/releases/tag/v1.5.0-alpha).
 
 ## Key features
 
@@ -49,7 +57,7 @@ Many of the below are the same as or similar to go-ethereum.
 
 For prerequisites and detailed build instructions please read the [Installation Instructions](https://geth.ethereum.org/docs/getting-started/installing-geth).
 
-Building `geth` requires both a Go (version 1.22 or later) and a C compiler (GCC 5 or higher). You can install
+Building `geth` requires both a Go (version 1.24 or later) and a C compiler (GCC 5 or higher). You can install
 them using your favourite package manager. Once the dependencies are installed, run
 
 ```shell
@@ -139,11 +147,11 @@ Download latest chaindata snapshot from [here](https://github.com/bnb-chain/bsc-
 
 #### 4. Start a full node
 ```shell
-## It will run with Path-Base Storage Scheme by default and enable inline state prune, keeping the latest 90000 blocks' history state.
-./geth --config ./config.toml --datadir ./node  --cache 8000 --rpc.allow-unprotected-txs --history.transactions 0
+## It will run with Path-Base Storage Scheme by default and enable inline state prune, keeping the latest 600000 blocks' history state.
+./geth --config ./config.toml --datadir ./node  --cache 8000 --rpc.allow-unprotected-txs --history.transactions 0 --history.logs 576000
 
 ## It is recommend to run fullnode with `--tries-verify-mode none` if you want high performance and care little about state consistency.
-./geth --config ./config.toml --datadir ./node  --cache 8000 --rpc.allow-unprotected-txs --history.transactions 0 --tries-verify-mode none
+./geth --config ./config.toml --datadir ./node  --cache 8000 --rpc.allow-unprotected-txs --history.transactions 0 --history.logs 576000 --tries-verify-mode none
 ```
 
 #### 5. Monitor node status
@@ -193,8 +201,8 @@ $ geth --your-favourite-flags dumpconfig
 
 As a developer, sooner rather than later you'll want to start interacting with `geth` and the
 BSC network via your own programs and not manually through the console. To aid
-this, `geth` has built-in support for a JSON-RPC based APIs ([standard APIs](https://ethereum.github.io/execution-apis/api-documentation/)
-and [`geth` specific APIs](https://geth.ethereum.org/docs/interacting-with-geth/rpc)).
+this, `geth` has built-in support for a JSON-RPC based APIs ([standard APIs](https://ethereum.org/en/developers/docs/apis/json-rpc/),
+[`geth` specific APIs](https://geth.ethereum.org/docs/interacting-with-geth/rpc), and [BSC's JSON-RPC API Reference](rpc/json-rpc-api.md)).
 These can be exposed via HTTP, WebSockets and IPC (UNIX sockets on UNIX based
 platforms, and named pipes on Windows).
 

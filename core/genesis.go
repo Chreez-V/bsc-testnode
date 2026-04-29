@@ -153,13 +153,13 @@ func hashAlloc(ga *types.GenesisAlloc, isVerkle bool) (common.Hash, error) {
 		if account.Balance != nil {
 			statedb.AddBalance(addr, uint256.MustFromBig(account.Balance), tracing.BalanceIncreaseGenesisBalance)
 		}
-		statedb.SetCode(addr, account.Code)
+		statedb.SetCode(addr, account.Code, tracing.CodeChangeGenesis)
 		statedb.SetNonce(addr, account.Nonce, tracing.NonceChangeGenesis)
 		for key, value := range account.Storage {
 			statedb.SetState(addr, key, value)
 		}
 	}
-	root, _, err := statedb.Commit(0, false, false)
+	root, err := statedb.Commit(0, false, false)
 	return root, err
 }
 
@@ -168,7 +168,11 @@ func hashAlloc(ga *types.GenesisAlloc, isVerkle bool) (common.Hash, error) {
 func flushAlloc(ga *types.GenesisAlloc, triedb *triedb.Database) (common.Hash, error) {
 	triedbConfig := triedb.Config()
 	if triedbConfig != nil {
+		origin := triedbConfig.NoTries
 		triedbConfig.NoTries = false
+		defer func() {
+			triedbConfig.NoTries = origin
+		}()
 	}
 
 	emptyRoot := types.EmptyRootHash
@@ -185,13 +189,13 @@ func flushAlloc(ga *types.GenesisAlloc, triedb *triedb.Database) (common.Hash, e
 			// already captures the allocations.
 			statedb.AddBalance(addr, uint256.MustFromBig(account.Balance), tracing.BalanceIncreaseGenesisBalance)
 		}
-		statedb.SetCode(addr, account.Code)
+		statedb.SetCode(addr, account.Code, tracing.CodeChangeGenesis)
 		statedb.SetNonce(addr, account.Nonce, tracing.NonceChangeGenesis)
 		for key, value := range account.Storage {
 			statedb.SetState(addr, key, value)
 		}
 	}
-	root, _, err := statedb.Commit(0, false, false)
+	root, err := statedb.Commit(0, false, false)
 	if err != nil {
 		return common.Hash{}, err
 	}
@@ -264,9 +268,14 @@ func (e *GenesisMismatchError) Error() string {
 // Typically, these modifications involve hardforks that are not enabled on the BSC mainnet, intended for testing purposes.
 type ChainOverrides struct {
 	OverridePassedForkTime *uint64
-	OverridePascal         *uint64
-	OverridePrague         *uint64
 	OverrideLorentz        *uint64
+	OverrideMaxwell        *uint64
+	OverrideFermi          *uint64
+	OverrideOsaka          *uint64
+	OverrideMendel         *uint64
+	OverrideBPO1           *uint64
+	OverrideBPO2           *uint64
+	OverridePasteur        *uint64
 	OverrideVerkle         *uint64
 }
 
@@ -284,15 +293,32 @@ func (o *ChainOverrides) apply(cfg *params.ChainConfig) error {
 		cfg.HaberTime = o.OverridePassedForkTime
 		cfg.HaberFixTime = o.OverridePassedForkTime
 		cfg.BohrTime = o.OverridePassedForkTime
-	}
-	if o.OverridePascal != nil {
-		cfg.PascalTime = o.OverridePascal
-	}
-	if o.OverridePrague != nil {
-		cfg.PragueTime = o.OverridePrague
+		cfg.PascalTime = o.OverridePassedForkTime
+		cfg.PragueTime = o.OverridePassedForkTime
 	}
 	if o.OverrideLorentz != nil {
 		cfg.LorentzTime = o.OverrideLorentz
+	}
+	if o.OverrideMaxwell != nil {
+		cfg.MaxwellTime = o.OverrideMaxwell
+	}
+	if o.OverrideFermi != nil {
+		cfg.FermiTime = o.OverrideFermi
+	}
+	if o.OverrideOsaka != nil {
+		cfg.OsakaTime = o.OverrideOsaka
+	}
+	if o.OverrideMendel != nil {
+		cfg.MendelTime = o.OverrideMendel
+	}
+	if o.OverrideBPO1 != nil {
+		cfg.BPO1Time = o.OverrideBPO1
+	}
+	if o.OverrideBPO2 != nil {
+		cfg.BPO2Time = o.OverrideBPO2
+	}
+	if o.OverridePasteur != nil {
+		cfg.PasteurTime = o.OverridePasteur
 	}
 	if o.OverrideVerkle != nil {
 		cfg.VerkleTime = o.OverrideVerkle
@@ -390,6 +416,9 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 		return nil, common.Hash{}, nil, errors.New("missing head header")
 	}
 	newCfg := genesis.chainConfigOrDefault(ghash, storedCfg)
+	if err := overrides.apply(newCfg); err != nil {
+		return nil, common.Hash{}, nil, err
+	}
 
 	// Sanity-check the new configuration.
 	if err := newCfg.CheckConfigForkOrder(); err != nil {
@@ -414,7 +443,7 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 // LoadChainConfig retrieves the predefined chain configuration for the built-in network.
 // For non-built-in networks, it first attempts to load the stored chain configuration from the database.
 // If the configuration is not present, it returns the configuration specified in the provided genesis specification.
-func LoadChainConfig(db ethdb.Database, genesis *Genesis) (*params.ChainConfig, common.Hash, error) {
+func LoadChainConfig(db ethdb.Database, genesis *Genesis) (cfg *params.ChainConfig, ghash common.Hash, err error) {
 	// Load the stored chain config from the database. It can be nil
 	// in case the database is empty. Notably, we only care about the
 	// chain config corresponds to the canonical chain.
@@ -439,10 +468,11 @@ func LoadChainConfig(db ethdb.Database, genesis *Genesis) (*params.ChainConfig, 
 		// config is missing(initialize the empty leveldb with an
 		// external ancient chain segment), ensure the provided genesis
 		// is matched.
-		if stored != (common.Hash{}) && genesis.ToBlock().Hash() != stored {
-			return nil, common.Hash{}, &GenesisMismatchError{stored, genesis.ToBlock().Hash()}
+		ghash := genesis.ToBlock().Hash()
+		if stored != (common.Hash{}) && ghash != stored {
+			return nil, ghash, &GenesisMismatchError{stored, ghash}
 		}
-		return genesis.Config, stored, nil
+		return genesis.Config, ghash, nil
 	}
 	// There is no stored chain config and no new config provided,
 	// In this case the default chain config(mainnet) will be used
@@ -508,7 +538,7 @@ func (g *Genesis) toBlockWithRoot(root common.Hash) *types.Block {
 		if g.BaseFee != nil {
 			head.BaseFee = g.BaseFee
 		} else {
-			if g.Config.Parlia != nil {
+			if g.Config.IsInBSC() {
 				head.BaseFee = new(big.Int).SetUint64(params.InitialBaseFeeForBSC)
 			} else {
 				head.BaseFee = new(big.Int).SetUint64(params.InitialBaseFee)
@@ -520,12 +550,12 @@ func (g *Genesis) toBlockWithRoot(root common.Hash) *types.Block {
 	)
 	if conf := g.Config; conf != nil {
 		num := big.NewInt(int64(g.Number))
-		if conf.Parlia == nil && conf.IsShanghai(num, g.Timestamp) {
+		if conf.IsNotInBSC() && conf.IsShanghai(num, g.Timestamp) {
 			head.WithdrawalsHash = &types.EmptyWithdrawalsHash
 			withdrawals = make([]*types.Withdrawal, 0)
 		}
 		if conf.IsCancun(num, g.Timestamp) {
-			if conf.Parlia != nil {
+			if conf.IsInBSC() {
 				head.WithdrawalsHash = &types.EmptyWithdrawalsHash
 				withdrawals = make([]*types.Withdrawal, 0)
 			}
@@ -533,7 +563,7 @@ func (g *Genesis) toBlockWithRoot(root common.Hash) *types.Block {
 			// EIP-4788: The parentBeaconBlockRoot of the genesis block is always
 			// the zero hash. This is because the genesis block does not have a parent
 			// by definition.
-			if conf.Parlia == nil || conf.IsBohr(num, g.Timestamp) {
+			if conf.IsNotInBSC() || conf.IsBohr(num, g.Timestamp) {
 				head.ParentBeaconRoot = new(common.Hash)
 			}
 
@@ -545,6 +575,11 @@ func (g *Genesis) toBlockWithRoot(root common.Hash) *types.Block {
 			}
 			if head.BlobGasUsed == nil {
 				head.BlobGasUsed = new(uint64)
+			}
+		} else {
+			if g.ExcessBlobGas != nil {
+				log.Warn("Invalid genesis, unexpected ExcessBlobGas set before Cancun, allowing it for testing purposes")
+				head.ExcessBlobGas = g.ExcessBlobGas
 			}
 		}
 		if conf.IsPrague(num, g.Timestamp) {
@@ -583,13 +618,13 @@ func (g *Genesis) Commit(db ethdb.Database, triedb *triedb.Database) (*types.Blo
 		return nil, err
 	}
 	rawdb.WriteGenesisStateSpec(db, block.Hash(), blob)
-	rawdb.WriteTd(db.BlockStore(), block.Hash(), block.NumberU64(), block.Difficulty())
-	rawdb.WriteBlock(db.BlockStore(), block)
-	rawdb.WriteReceipts(db.BlockStore(), block.Hash(), block.NumberU64(), nil)
-	rawdb.WriteCanonicalHash(db.BlockStore(), block.Hash(), block.NumberU64())
-	rawdb.WriteHeadBlockHash(db.BlockStore(), block.Hash())
-	rawdb.WriteHeadFastBlockHash(db.BlockStore(), block.Hash())
-	rawdb.WriteHeadHeaderHash(db.BlockStore(), block.Hash())
+	rawdb.WriteTd(db, block.Hash(), block.NumberU64(), block.Difficulty())
+	rawdb.WriteBlock(db, block)
+	rawdb.WriteReceipts(db, block.Hash(), block.NumberU64(), nil)
+	rawdb.WriteCanonicalHash(db, block.Hash(), block.NumberU64())
+	rawdb.WriteHeadBlockHash(db, block.Hash())
+	rawdb.WriteHeadFastBlockHash(db, block.Hash())
+	rawdb.WriteHeadHeaderHash(db, block.Hash())
 	rawdb.WriteChainConfig(db, block.Hash(), config)
 	return block, nil
 }
@@ -683,15 +718,24 @@ func DeveloperGenesisBlock(gasLimit uint64, faucet *common.Address) *Genesis {
 		BaseFee:    big.NewInt(params.InitialBaseFee),
 		Difficulty: big.NewInt(0),
 		Alloc: map[common.Address]types.Account{
-			common.BytesToAddress([]byte{1}): {Balance: big.NewInt(1)}, // ECRecover
-			common.BytesToAddress([]byte{2}): {Balance: big.NewInt(1)}, // SHA256
-			common.BytesToAddress([]byte{3}): {Balance: big.NewInt(1)}, // RIPEMD
-			common.BytesToAddress([]byte{4}): {Balance: big.NewInt(1)}, // Identity
-			common.BytesToAddress([]byte{5}): {Balance: big.NewInt(1)}, // ModExp
-			common.BytesToAddress([]byte{6}): {Balance: big.NewInt(1)}, // ECAdd
-			common.BytesToAddress([]byte{7}): {Balance: big.NewInt(1)}, // ECScalarMul
-			common.BytesToAddress([]byte{8}): {Balance: big.NewInt(1)}, // ECPairing
-			common.BytesToAddress([]byte{9}): {Balance: big.NewInt(1)}, // BLAKE2b
+			common.BytesToAddress([]byte{0x01}):    {Balance: big.NewInt(1)}, // ECRecover
+			common.BytesToAddress([]byte{0x02}):    {Balance: big.NewInt(1)}, // SHA256
+			common.BytesToAddress([]byte{0x03}):    {Balance: big.NewInt(1)}, // RIPEMD
+			common.BytesToAddress([]byte{0x04}):    {Balance: big.NewInt(1)}, // Identity
+			common.BytesToAddress([]byte{0x05}):    {Balance: big.NewInt(1)}, // ModExp
+			common.BytesToAddress([]byte{0x06}):    {Balance: big.NewInt(1)}, // ECAdd
+			common.BytesToAddress([]byte{0x07}):    {Balance: big.NewInt(1)}, // ECScalarMul
+			common.BytesToAddress([]byte{0x08}):    {Balance: big.NewInt(1)}, // ECPairing
+			common.BytesToAddress([]byte{0x09}):    {Balance: big.NewInt(1)}, // BLAKE2b
+			common.BytesToAddress([]byte{0x0a}):    {Balance: big.NewInt(1)}, // KZGPointEval
+			common.BytesToAddress([]byte{0x0b}):    {Balance: big.NewInt(1)}, // BLSG1Add
+			common.BytesToAddress([]byte{0x0c}):    {Balance: big.NewInt(1)}, // BLSG1MultiExp
+			common.BytesToAddress([]byte{0x0d}):    {Balance: big.NewInt(1)}, // BLSG2Add
+			common.BytesToAddress([]byte{0x0e}):    {Balance: big.NewInt(1)}, // BLSG2MultiExp
+			common.BytesToAddress([]byte{0x0f}):    {Balance: big.NewInt(1)}, // BLSG1Pairing
+			common.BytesToAddress([]byte{0x10}):    {Balance: big.NewInt(1)}, // BLSG1MapG1
+			common.BytesToAddress([]byte{0x11}):    {Balance: big.NewInt(1)}, // BLSG2MapG2
+			common.BytesToAddress([]byte{0x1, 00}): {Balance: big.NewInt(1)}, // P256Verify
 			// Pre-deploy system contracts
 			params.BeaconRootsAddress:        {Nonce: 1, Code: params.BeaconRootsCode, Balance: common.Big0},
 			params.HistoryStorageAddress:     {Nonce: 1, Code: params.HistoryStorageCode, Balance: common.Big0},

@@ -23,6 +23,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -46,6 +47,8 @@ const (
 	snappyProtocolVersion = 5
 
 	pingInterval = 15 * time.Second
+
+	slowPeerLatencyThreshold = 500
 )
 
 const (
@@ -113,12 +116,25 @@ type Peer struct {
 	protoErr chan error
 	closed   chan struct{}
 	pingRecv chan struct{}
+	pongRecv chan struct{}
 	disc     chan DiscReason
 
 	// events receives message send / receive events if set
 	events         *event.Feed
 	testPipe       *MsgPipeRW // for testing
 	testRemoteAddr string     // for testing
+
+	latency atomic.Int64 // mill second latency, estimated by ping msg
+
+	// it indicates the peer is in the validator network, it will directly broadcast when miner/sentry broadcast mined block,
+	// and won't broadcast any txs between EVN peers.
+	EVNPeerFlag atomic.Bool
+
+	// Indicates whether this peer is proxyed.
+	ProxyedPeerFlag atomic.Bool
+
+	// it indicates the peer can handle BAL(block access list) packet
+	CanHandleBAL atomic.Bool
 }
 
 // NewPeer returns a peer for testing purposes.
@@ -184,7 +200,6 @@ func (p *Peer) Fullname() string {
 
 // Caps returns the capabilities (supported subprotocols) of the remote peer.
 func (p *Peer) Caps() []Cap {
-	// TODO: maybe return copy
 	return p.rw.caps
 }
 
@@ -193,10 +208,8 @@ func (p *Peer) Caps() []Cap {
 // versions is supported by both this node and the peer p.
 func (p *Peer) RunningCap(protocol string, versions []uint) bool {
 	if proto, ok := p.running[protocol]; ok {
-		for _, ver := range versions {
-			if proto.Version == ver {
-				return true
-			}
+		if slices.Contains(versions, proto.Version) {
+			return true
 		}
 	}
 	return false
@@ -248,14 +261,33 @@ func (p *Peer) String() string {
 	return fmt.Sprintf("Peer %x %v", id[:8], p.RemoteAddr())
 }
 
-// Inbound returns true if the peer is an inbound connection
+// Inbound returns true if the peer is an inbound (not dialed) connection.
 func (p *Peer) Inbound() bool {
 	return p.rw.is(inboundConn)
 }
 
-// VerifyNode returns true if the peer is a verification connection
-func (p *Peer) VerifyNode() bool {
-	return p.rw.is(verifyConn)
+// Trusted returns true if the peer is configured as trusted.
+// Trusted peers are accepted in above the MaxInboundConns limit.
+// The peer can be either inbound or dialed.
+func (p *Peer) Trusted() bool {
+	return p.rw.is(trustedConn)
+}
+
+// DynDialed returns true if the peer was dialed successfully (passed handshake) and
+// it is not configured as static.
+func (p *Peer) DynDialed() bool {
+	return p.rw.is(dynDialedConn)
+}
+
+// StaticDialed returns true if the peer was dialed successfully (passed handshake) and
+// it is configured as static.
+func (p *Peer) StaticDialed() bool {
+	return p.rw.is(staticDialedConn)
+}
+
+// Lifetime returns the time since peer creation.
+func (p *Peer) Lifetime() mclock.AbsTime {
+	return mclock.Now() - p.created
 }
 
 func newPeer(log log.Logger, conn *conn, protocols []Protocol) *Peer {
@@ -268,6 +300,7 @@ func newPeer(log log.Logger, conn *conn, protocols []Protocol) *Peer {
 		protoErr: make(chan error, len(protomap)+1), // protocols + pingLoop
 		closed:   make(chan struct{}),
 		pingRecv: make(chan struct{}, 16),
+		pongRecv: make(chan struct{}, 16),
 		log:      log.New("id", conn.node.ID(), "conn", conn.flags),
 	}
 	return p
@@ -287,6 +320,8 @@ func (p *Peer) run() (remoteRequested bool, err error) {
 	p.wg.Add(2)
 	go p.readLoop(readErr)
 	go p.pingLoop()
+	live1min := time.NewTimer(1 * time.Minute)
+	defer live1min.Stop()
 
 	// Start all protocol handlers.
 	writeStart <- struct{}{}
@@ -318,6 +353,12 @@ loop:
 		case err = <-p.disc:
 			reason = discReasonForError(err)
 			break loop
+		case <-live1min.C:
+			if p.Inbound() {
+				serve1MinSuccessMeter.Mark(1)
+			} else {
+				dial1MinSuccessMeter.Mark(1)
+			}
 		}
 	}
 
@@ -333,9 +374,11 @@ func (p *Peer) pingLoop() {
 	ping := time.NewTimer(pingInterval)
 	defer ping.Stop()
 
+	var startPing atomic.Int64
 	for {
 		select {
 		case <-ping.C:
+			startPing.Store(time.Now().UnixMilli())
 			if err := SendItems(p.rw, pingMsg); err != nil {
 				p.protoErr <- err
 				return
@@ -345,6 +388,20 @@ func (p *Peer) pingLoop() {
 		case <-p.pingRecv:
 			SendItems(p.rw, pongMsg)
 
+		case <-p.pongRecv:
+			// estimate latency here, it also includes tiny msg encode/decode, io wait time
+			latency := (time.Now().UnixMilli() - startPing.Load()) / 2
+			if latency > 0 {
+				p.latency.Store(latency)
+				if p.EVNPeerFlag.Load() {
+					evnPeerLatencyStat.Update(time.Duration(latency))
+				} else {
+					normalPeerLatencyStat.Update(time.Duration(latency))
+				}
+				if latency > slowPeerLatencyThreshold {
+					log.Debug("find a too slow peer", "id", p.ID(), "peer", p.RemoteAddr(), "latency", latency)
+				}
+			}
 		case <-p.closed:
 			return
 		}
@@ -373,6 +430,12 @@ func (p *Peer) handle(msg Msg) error {
 		msg.Discard()
 		select {
 		case p.pingRecv <- struct{}{}:
+		case <-p.closed:
+		}
+	case msg.Code == pongMsg:
+		msg.Discard()
+		select {
+		case p.pongRecv <- struct{}{}:
 		case <-p.closed:
 		}
 	case msg.Code == discMsg:
@@ -556,7 +619,9 @@ type PeerInfo struct {
 		Trusted       bool   `json:"trusted"`
 		Static        bool   `json:"static"`
 	} `json:"network"`
-	Protocols map[string]interface{} `json:"protocols"` // Sub-protocol specific metadata fields
+	Protocols   map[string]interface{} `json:"protocols"` // Sub-protocol specific metadata fields
+	Latency     int64                  `json:"latency"`   // the estimate latency from ping msg
+	EVNPeerFlag bool                   `json:"evnPeerFlag"`
 }
 
 // Info gathers and returns a collection of metadata known about a peer.
@@ -568,11 +633,13 @@ func (p *Peer) Info() *PeerInfo {
 	}
 	// Assemble the generic peer metadata
 	info := &PeerInfo{
-		Enode:     p.Node().URLv4(),
-		ID:        p.ID().String(),
-		Name:      p.Fullname(),
-		Caps:      caps,
-		Protocols: make(map[string]interface{}, len(p.running)),
+		Enode:       p.Node().URLv4(),
+		ID:          p.ID().String(),
+		Name:        p.Fullname(),
+		Caps:        caps,
+		Protocols:   make(map[string]interface{}, len(p.running)),
+		Latency:     p.latency.Load(),
+		EVNPeerFlag: p.EVNPeerFlag.Load(),
 	}
 	if p.Node().Seq() > 0 {
 		info.ENR = p.Node().String()
@@ -580,7 +647,8 @@ func (p *Peer) Info() *PeerInfo {
 	info.Network.LocalAddress = p.LocalAddr().String()
 	info.Network.RemoteAddress = p.RemoteAddr().String()
 	info.Network.Inbound = p.rw.is(inboundConn)
-	info.Network.Trusted = p.rw.is(trustedConn)
+	// After Maxwell, we treat all EVN peers as trusted
+	info.Network.Trusted = p.rw.is(trustedConn) || p.EVNPeerFlag.Load() || p.ProxyedPeerFlag.Load()
 	info.Network.Static = p.rw.is(staticDialedConn)
 
 	// Gather all the running protocol infos

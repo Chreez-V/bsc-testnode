@@ -18,30 +18,35 @@ package eth
 
 import (
 	"crypto/ecdsa"
+	"maps"
 	"math/big"
+	"math/rand"
 	"sort"
 	"sync"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
-	"github.com/ethereum/go-ethereum/core/state"
-	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/ethereum/go-ethereum/crypto/kzg4844"
-	"github.com/ethereum/go-ethereum/trie"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
+	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
+	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
+	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/holiman/uint256"
 )
 
@@ -86,6 +91,36 @@ func (p *testTxPool) Get(hash common.Hash) *types.Transaction {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 	return p.pool[hash]
+}
+
+// Get retrieves the transaction from local txpool with given
+// tx hash.
+func (p *testTxPool) GetRLP(hash common.Hash) []byte {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	tx := p.pool[hash]
+	if tx != nil {
+		blob, _ := rlp.EncodeToBytes(tx)
+		return blob
+	}
+	return nil
+}
+
+// GetMetadata returns the transaction type and transaction size with the given
+// hash.
+func (p *testTxPool) GetMetadata(hash common.Hash) *txpool.TxMetadata {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	tx := p.pool[hash]
+	if tx != nil {
+		return &txpool.TxMetadata{
+			Type: tx.Type(),
+			Size: tx.Size(),
+		}
+	}
+	return nil
 }
 
 // Add appends a batch of transactions to the pool, and notifies any
@@ -180,7 +215,7 @@ func newTestHandlerWithBlocks(blocks int) *testHandler {
 		Config: params.TestChainConfig,
 		Alloc:  types.GenesisAlloc{testAddr: {Balance: big.NewInt(1000000)}},
 	}
-	chain, _ := core.NewBlockChain(db, nil, gspec, nil, ethash.NewFaker(), vm.Config{}, nil, nil)
+	chain, _ := core.NewBlockChain(db, gspec, ethash.NewFaker(), nil)
 
 	_, bs, _ := core.GenerateChainWithGenesis(gspec, ethash.NewFaker(), blocks, nil)
 	if _, err := chain.InsertChain(bs); err != nil {
@@ -261,7 +296,7 @@ func (c *mockParlia) CalcDifficulty(chain consensus.ChainHeaderReader, time uint
 func newTestParliaHandlerAfterCancun(t *testing.T, config *params.ChainConfig, mode ethconfig.SyncMode, preCancunBlks, postCancunBlks uint64) *testHandler {
 	// Have N headers in the freezer
 	frdir := t.TempDir()
-	db, err := rawdb.NewDatabaseWithFreezer(rawdb.NewMemoryDatabase(), frdir, "", false, false, false, false, false)
+	db, err := rawdb.NewDatabaseWithFreezer(rawdb.NewMemoryDatabase(), frdir, "", false)
 	if err != nil {
 		t.Fatalf("failed to create database with ancient backend")
 	}
@@ -270,7 +305,9 @@ func newTestParliaHandlerAfterCancun(t *testing.T, config *params.ChainConfig, m
 		Alloc:  types.GenesisAlloc{testAddr: {Balance: new(big.Int).SetUint64(10 * params.Ether)}},
 	}
 	engine := &mockParlia{}
-	chain, _ := core.NewBlockChain(db, nil, gspec, nil, engine, vm.Config{}, nil, nil)
+	cfg := core.DefaultConfig()
+	cfg.StateScheme = rawdb.PathScheme
+	chain, _ := core.NewBlockChain(db, gspec, engine, cfg)
 	signer := types.LatestSigner(config)
 
 	_, bs, _ := core.GenerateChainWithGenesis(gspec, engine, int(preCancunBlks+postCancunBlks), func(i int, gen *core.BlockGen) {
@@ -319,7 +356,9 @@ func (b *testHandler) close() {
 	b.chain.Stop()
 }
 
-// newTestVotePool creates a mock vote pool.
+// testVotePool is a mock vote pool that simply collects and stores votes.
+// Its purpose is to simulate vote collection behavior without implementing
+// complex validation and consensus rules.
 type testVotePool struct {
 	pool map[common.Hash]*types.VoteEnvelope // Hash map of collected votes
 
@@ -342,7 +381,7 @@ func (t *testVotePool) PutVote(vote *types.VoteEnvelope) {
 	t.voteFeed.Send(core.NewVoteEvent{Vote: vote})
 }
 
-func (t *testVotePool) FetchVoteByBlockHash(blockHash common.Hash) []*types.VoteEnvelope {
+func (t *testVotePool) FetchVotesByBlockHash(targetBlockHash common.Hash, sourceBlockNum uint64) []*types.VoteEnvelope {
 	panic("implement me")
 }
 
@@ -399,4 +438,103 @@ func makeMockTx(config *params.ChainConfig, signer types.Signer, key *ecdsa.Priv
 	}
 	tx, _ := types.SignTx(types.NewTx(raw), signer, key)
 	return tx, sidecar
+}
+
+func TestBroadcastChoice(t *testing.T) {
+	self := enode.HexID("1111111111111111111111111111111111111111111111111111111111111111")
+	choice49 := newBroadcastChoice(self, [16]byte{1})
+	choice50 := newBroadcastChoice(self, [16]byte{1})
+
+	// Create test peers and random tx sender addresses.
+	rand := rand.New(rand.NewSource(33))
+	txsenders := make([]common.Address, 400)
+	for i := range txsenders {
+		rand.Read(txsenders[i][:])
+	}
+	peers := createTestPeers(rand, 50)
+	defer closePeers(peers)
+
+	// Evaluate choice49 first.
+	expectedCount := 7 // sqrt(49)
+	var chosen49 = make([]map[*ethPeer]struct{}, len(txsenders))
+	for i, txSender := range txsenders {
+		set := choice49.choosePeers(peers[:49], txSender)
+		chosen49[i] = maps.Clone(set)
+
+		// Sanity check choices. Here we check that the function selects different peers
+		// for different transaction senders.
+		if len(set) != expectedCount {
+			t.Fatalf("choice49 produced wrong count %d, want %d", len(set), expectedCount)
+		}
+		if i > 0 && maps.Equal(set, chosen49[i-1]) {
+			t.Errorf("choice49 for tx %d is equal to tx %d", i, i-1)
+		}
+	}
+
+	// Evaluate choice50 for the same peers and transactions. It should always yield more
+	// peers than choice49, and the chosen set should be a superset of choice49's.
+	for i, txSender := range txsenders {
+		set := choice50.choosePeers(peers[:50], txSender)
+		if len(set) < len(chosen49[i]) {
+			t.Errorf("for tx %d, choice50 has less peers than choice49", i)
+		}
+		for p := range chosen49[i] {
+			if _, ok := set[p]; !ok {
+				t.Errorf("for tx %d, choice50 did not choose peer %v, but choice49 did", i, p.ID())
+			}
+		}
+	}
+}
+
+func BenchmarkBroadcastChoice(b *testing.B) {
+	b.Run("50", func(b *testing.B) {
+		benchmarkBroadcastChoice(b, 50)
+	})
+	b.Run("200", func(b *testing.B) {
+		benchmarkBroadcastChoice(b, 200)
+	})
+	b.Run("500", func(b *testing.B) {
+		benchmarkBroadcastChoice(b, 500)
+	})
+}
+
+// This measures the overhead of sending one transaction to N peers.
+func benchmarkBroadcastChoice(b *testing.B, npeers int) {
+	rand := rand.New(rand.NewSource(33))
+	peers := createTestPeers(rand, npeers)
+	defer closePeers(peers)
+
+	txsenders := make([]common.Address, b.N)
+	for i := range txsenders {
+		rand.Read(txsenders[i][:])
+	}
+
+	self := enode.HexID("1111111111111111111111111111111111111111111111111111111111111111")
+	choice := newBroadcastChoice(self, [16]byte{1})
+
+	b.ResetTimer()
+	for i := range b.N {
+		set := choice.choosePeers(peers, txsenders[i])
+		if len(set) == 0 {
+			b.Fatal("empty result")
+		}
+	}
+}
+
+func createTestPeers(rand *rand.Rand, n int) []*ethPeer {
+	peers := make([]*ethPeer, n)
+	for i := range peers {
+		var id enode.ID
+		rand.Read(id[:])
+		p2pPeer := p2p.NewPeer(id, "test", nil)
+		ep := eth.NewPeer(eth.ETH69, p2pPeer, nil, nil)
+		peers[i] = &ethPeer{Peer: ep}
+	}
+	return peers
+}
+
+func closePeers(peers []*ethPeer) {
+	for _, p := range peers {
+		p.Close()
+	}
 }

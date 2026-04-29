@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -33,8 +34,13 @@ type revertError struct {
 	reason string // revert reason hex encoded
 }
 
+type txSyncTimeoutError struct {
+	msg  string
+	hash common.Hash
+}
+
 // ErrorCode returns the JSON error code for a revert.
-// See: https://github.com/ethereum/wiki/wiki/JSON-RPC-Error-Codes-Improvement-Proposal
+// See: https://ethereum.org/en/developers/docs/apis/json-rpc/#error-codes
 func (e *revertError) ErrorCode() int {
 	return 3
 }
@@ -42,6 +48,10 @@ func (e *revertError) ErrorCode() int {
 // ErrorData returns the hex encoded revert reason.
 func (e *revertError) ErrorData() interface{} {
 	return e.reason
+}
+
+func (e *revertError) Error() string {
+	return fmt.Sprintf("%v: %s", e.error, e.reason)
 }
 
 // newRevertError creates a revertError instance with the provided revert data.
@@ -71,7 +81,7 @@ func (e *TxIndexingError) Error() string {
 }
 
 // ErrorCode returns the JSON error code for a revert.
-// See: https://github.com/ethereum/wiki/wiki/JSON-RPC-Error-Codes-Improvement-Proposal
+// See: https://ethereum.org/en/developers/docs/apis/json-rpc/#error-codes
 func (e *TxIndexingError) ErrorCode() int {
 	return -32000 // to be decided
 }
@@ -108,6 +118,7 @@ const (
 	errCodeInvalidParams           = -32602
 	errCodeReverted                = -32000
 	errCodeVMError                 = -32015
+	errCodeTxSyncTimeout           = 4
 )
 
 func txValidationError(err error) *invalidTxError {
@@ -168,3 +179,7 @@ type blockGasLimitReachedError struct{ message string }
 
 func (e *blockGasLimitReachedError) Error() string  { return e.message }
 func (e *blockGasLimitReachedError) ErrorCode() int { return errCodeBlockGasLimitReached }
+
+func (e *txSyncTimeoutError) Error() string          { return e.msg }
+func (e *txSyncTimeoutError) ErrorCode() int         { return errCodeTxSyncTimeout }
+func (e *txSyncTimeoutError) ErrorData() interface{} { return e.hash.Hex() }

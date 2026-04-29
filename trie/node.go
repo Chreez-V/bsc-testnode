@@ -27,8 +27,6 @@ import (
 
 var indices = []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f", "[17]"}
 
-type TrieNode = node
-type TrieFullNode = fullNode
 type node interface {
 	cache() (hashNode, bool)
 	encode(w rlp.EncoderBuffer)
@@ -70,10 +68,6 @@ type (
 	}
 )
 
-// nilValueNode is used when collapsing internal trie nodes for hashing, since
-// unset children need to serialize correctly.
-var nilValueNode = valueNode(nil)
-
 // EncodeRLP encodes a full node into the consensus RLP format.
 func (n *fullNode) EncodeRLP(w io.Writer) error {
 	eb := rlp.NewEncoderBuffer(w)
@@ -81,13 +75,17 @@ func (n *fullNode) EncodeRLP(w io.Writer) error {
 	return eb.Flush()
 }
 
-func (n *fullNode) copy() *fullNode   { copy := *n; return &copy }
-func (n *shortNode) copy() *shortNode { copy := *n; return &copy }
-
 // nodeFlag contains caching-related metadata about a node.
 type nodeFlag struct {
 	hash  hashNode // cached hash of the node (may be nil)
 	dirty bool     // whether the node has changes that must be written to the database
+}
+
+func (n nodeFlag) copy() nodeFlag {
+	return nodeFlag{
+		hash:  common.CopyBytes(n.hash),
+		dirty: n.dirty,
+	}
 }
 
 func (n *fullNode) cache() (hashNode, bool)  { return n.flags.hash, n.flags.dirty }
@@ -167,11 +165,14 @@ func decodeNodeUnsafe(hash, buf []byte) (node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode error: %v", err)
 	}
-	switch c, _ := rlp.CountValues(elems); c {
-	case 2:
+	c, err := rlp.CountValues(elems)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("invalid node list: %v", err)
+	case c == 2:
 		n, err := decodeShort(hash, elems)
 		return n, wrapError(err, "short")
-	case 17:
+	case c == 17:
 		n, err := decodeFull(hash, elems)
 		return n, wrapError(err, "full")
 	default:
@@ -235,7 +236,9 @@ func decodeRef(buf []byte) (node, []byte, error) {
 			err := fmt.Errorf("oversized embedded node (size is %d bytes, want size < %d)", size, hashLen)
 			return nil, buf, err
 		}
-		n, err := decodeNode(nil, buf)
+		// The buffer content has already been copied or is safe to use;
+		// no additional copy is required.
+		n, err := decodeNodeUnsafe(nil, buf)
 		return n, rest, err
 	case kind == rlp.String && len(val) == 0:
 		// empty node

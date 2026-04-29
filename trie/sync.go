@@ -19,6 +19,7 @@ package trie
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -565,7 +566,7 @@ func (s *Sync) children(req *nodeRequest, object node) ([]*nodeRequest, error) {
 		}
 		children = []childNode{{
 			node: node.Val,
-			path: append(append([]byte(nil), req.path...), key...),
+			path: slices.Concat(req.path, key),
 		}}
 		// Mark all internal nodes between shortNode and its **in disk**
 		// child as invalid. This is essential in the case of path mode
@@ -607,7 +608,7 @@ func (s *Sync) children(req *nodeRequest, object node) ([]*nodeRequest, error) {
 			if node.Children[i] != nil {
 				children = append(children, childNode{
 					node: node.Children[i],
-					path: append(append([]byte(nil), req.path...), byte(i)),
+					path: append(slices.Clone(req.path), byte(i)),
 				})
 			}
 		}
@@ -741,9 +742,7 @@ func (s *Sync) hasNode(owner common.Hash, path []byte, hash common.Hash) (exists
 	} else {
 		blob = rawdb.ReadStorageTrieNode(s.database.StateStoreReader(), owner, path)
 	}
-	h := newBlobHasher()
-	defer h.release()
-	exists = hash == h.hash(blob)
+	exists = hash == crypto.Keccak256Hash(blob)
 	inconsistent = !exists && len(blob) != 0
 	return exists, inconsistent
 }
@@ -757,24 +756,4 @@ func ResolvePath(path []byte) (common.Hash, []byte) {
 		path = path[2*common.HashLength:]
 	}
 	return owner, path
-}
-
-// blobHasher is used to compute the sha256 hash of the provided data.
-type blobHasher struct{ state crypto.KeccakState }
-
-// blobHasherPool is the pool for reusing pre-allocated hash state.
-var blobHasherPool = sync.Pool{
-	New: func() interface{} { return &blobHasher{state: crypto.NewKeccakState()} },
-}
-
-func newBlobHasher() *blobHasher {
-	return blobHasherPool.Get().(*blobHasher)
-}
-
-func (h *blobHasher) hash(data []byte) common.Hash {
-	return crypto.HashData(h.state, data)
-}
-
-func (h *blobHasher) release() {
-	blobHasherPool.Put(h)
 }
