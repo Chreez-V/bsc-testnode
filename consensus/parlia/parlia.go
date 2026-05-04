@@ -802,6 +802,13 @@ func (p *Parlia) snapshot(chain consensus.ChainHeaderReader, number uint64, hash
 				epochLength   = defaultEpochLength
 			)
 			if number == 0 {
+				// Use genesis config values when available
+				if p.config.Period > 0 {
+					blockInterval = p.config.Period * 1000 // convert seconds to milliseconds
+				}
+				if p.config.Epoch > 0 {
+					epochLength = p.config.Epoch
+				}
 				checkpoint = chain.GetHeaderByNumber(0)
 				if checkpoint != nil {
 					blockHash = checkpoint.Hash()

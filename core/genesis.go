@@ -455,6 +455,23 @@ func LoadChainConfig(db ethdb.Database, genesis *Genesis) (cfg *params.ChainConf
 		}
 		storedcfg := rawdb.ReadChainConfig(db, stored)
 		if storedcfg != nil {
+			// If genesis is provided and the stored ParliaConfig is missing Period/Epoch
+			// (e.g. initialized with an older binary that had no fields), restore them
+			// from the genesis spec so custom testnets respect their configured values.
+			if genesis != nil && genesis.Config != nil && storedcfg.Parlia != nil && genesis.Config.Parlia != nil {
+				updated := false
+				if storedcfg.Parlia.Period == 0 && genesis.Config.Parlia.Period > 0 {
+					storedcfg.Parlia.Period = genesis.Config.Parlia.Period
+					updated = true
+				}
+				if storedcfg.Parlia.Epoch == 0 && genesis.Config.Parlia.Epoch > 0 {
+					storedcfg.Parlia.Epoch = genesis.Config.Parlia.Epoch
+					updated = true
+				}
+				if updated {
+					rawdb.WriteChainConfig(db, stored, storedcfg)
+				}
+			}
 			return storedcfg, stored, nil
 		}
 	}
