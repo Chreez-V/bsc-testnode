@@ -1,21 +1,55 @@
 [Eth]
-NetworkId = 714
+NetworkId = 35039980
 SyncMode = "full"
+DisablePeerTxBroadcast = false
+EthDiscoveryURLs = []
+SnapDiscoveryURLs = []
+BscDiscoveryURLs = []
 NoPruning = false
 NoPrefetch = false
+DirectBroadcast = false
+DisableSnapProtocol = false
+RangeLimit = false
 DatabaseCache = 512
 DatabaseFreezer = ""
+PruneAncientData = false
 TrieCleanCache = 256
 TrieDirtyCache = 256
-TriesInMemory = 128
 TrieTimeout = 3600000000000
+SnapshotCache = 0
+TriesInMemory = 128
+TriesVerifyMode = "local"
+Preimages = false
+FilterLogCacheSize = 0
 EnablePreimageRecording = false
+VMTrace = ""
+VMTraceJsonConfig = ""
+RPCGasCap = 0
+RPCEVMTimeout = 0
+RPCTxFeeCap = 0e+00
+BlobExtraReserve = 0
 
 [Eth.Miner]
+DelayLeftOver = 0
 GasFloor = 30000000
 GasCeil = 40000000
 GasPrice = 10000000000
 Recommit = 10000000000
+VoteEnable = false
+MaxWaitProposalInSecs = 0
+DisableVoteAttestation = false
+
+[Eth.Miner.Mev]
+Enabled = true
+GreedyMergeTx = true
+BuilderFeeCeil = "0"
+SentryURL = ""
+ValidatorCommission = 1000
+BidSimulationLeftOver = 50000000
+
+[[Eth.Miner.Mev.Builders]]
+Address = "0x0000000000000000000000000000000000000000"
+URL = ""
 
 [Eth.TxPool]
 Locals = []
@@ -24,38 +58,63 @@ Journal = "transactions.rlp"
 Rejournal = 3600000000000
 PriceLimit = 10000000000
 PriceBump = 10
-AccountSlots = 16
-GlobalSlots = 4096
-AccountQueue = 64
-GlobalQueue = 1024
-Lifetime = 10800000000000
+AccountSlots = 5000
+GlobalSlots = 32768
+AccountQueue = 512
+GlobalQueue = 32768
+OverflowPoolSlots = 32768
+Lifetime = 86400000000000
+ReannounceTime = 0
 
+[Eth.BlobPool]
+Datadir = ""
+Datacap = 0
+PriceBump = 0
+
+[Eth.GPO]
+Blocks = 0
+Percentile = 0
+MaxHeaderHistory = 0
+MaxBlockHistory = 0
 
 [Node]
-IPCPath = "geth.ipc"
-HTTPHost = "0.0.0.0"
-NoUSB = true
+DataDir = ""
 InsecureUnlockAllowed = true
+IPCPath = "geth.ipc"
+HTTPHost = "127.0.0.1"
 HTTPPort = 8545
 HTTPVirtualHosts = ["*"]
-HTTPModules = ["eth", "net", "web3", "txpool", "parlia"]
+HTTPModules = ["eth", "net", "web3", "txpool", "parlia", "debug"]
 WSHost = "0.0.0.0"
 WSPort = 8545
+WSModules = []
 
 [Node.P2P]
 MaxPeers = 50
 NoDiscovery = false
+BootstrapNodes = []
 StaticNodes = []
 TrustedNodes = []
+ListenAddr = ":30315"
+DiscAddr = ""
 EnableMsgEvents = false
+PeerFilterPatterns = []
 
 [Node.HTTPTimeouts]
 ReadTimeout = 30000000000
+ReadHeaderTimeout = 0
 WriteTimeout = 30000000000
 IdleTimeout = 120000000000
 
 [Node.LogConfig]
-FilePath = "bsc.log"
+FileRoot = ""
+FilePath = "node.log"
 MaxBytesSize = 10485760
 Level = "info"
-FileRoot = ""
+MaxBackups = 1000
+TimeFormat = "01-02|15:04:05.000"
+
+[FakeBeacon]
+Enable = false
+Addr = ""
+Port = 0
