@@ -1,0 +1,89 @@
+{
+  "config": {
+    "chainId": 35039980,
+    "homesteadBlock": 0,
+    "eip150Block": 0,
+    "eip155Block": 0,
+    "eip158Block": 0,
+    "byzantiumBlock": 0,
+    "constantinopleBlock": 0,
+    "petersburgBlock": 0,
+    "istanbulBlock": 0,
+    "muirGlacierBlock": 0,
+    "berlinBlock": 0,
+    "londonBlock": 0,
+    "arrowGlacierBlock": 0,
+    "grayGlacierBlock": 0,
+    "mergeNetsplitBlock": 0,
+    "ramanujanBlock": 0,
+    "nielsBlock": 0,
+    "mirrorSyncBlock": 0,
+    "brunoBlock": 0,
+    "eulerBlock": 0,
+    "nanoBlock": 0,
+    "moranBlock": 0,
+    "gibbsBlock": 0,
+    "planckBlock": 0,
+    "lubanBlock": 0,
+    "platoBlock": 0,
+    "hertzBlock": 0,
+    "hertzfixBlock": 0,
+    "shanghaiTime": 0,
+    "keplerTime": 0,
+    "feynmanTime": 0,
+    "feynmanFixTime": 0,
+    "cancunTime": 0,
+    "haberTime": 0,
+    "haberFixTime": 0,
+    "bohrTime": 0,
+    "parlia": {
+      "period": 30,
+      "epoch": 90000
+    },
+    "blobSchedule": {
+      "cancun": {
+        "target": 3,
+        "max": 6,
+        "baseFeeUpdateFraction": 3338477
+      },
+      "prague": {
+        "target": 6,
+        "max": 9,
+        "baseFeeUpdateFraction": 5007716
+      }
+    }
+  },
+  "nonce": "0x0",
+  "timestamp": "0x0",
+  "extraData": "0x00000000000000000000000000000000000000000000000000000000000000000127f3e5cebba574be9dbfa8b20874b9484fa5e22d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "gasLimit": "0x23f3e20",
+  "difficulty": "0x1",
+  "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "alloc": {
+    "27f3e5cebba574be9dbfa8b20874b9484fa5e22d": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
+    "109e21dd6E9Ba8f67D3A632B1B70fFD3E6ed24ad": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
+    "EA3c9812afBE58Ace71063E217Dd28884938CA1a": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
+    "1a05F53D59A1F01291BeE8Bb622159Fb652a0101": {
+      "balance": "0x0"
+    },
+    "9Bfa03341d5D56A441eFdfEEbbECed6e791F91C7": {
+      "balance": "0xd3c21bcecceda1000000"
+    },
+    "B746DA4f852D0ad2474B65F52fB2d0E0bb86EADa": {
+      "balance": "0x0"
+    },
+    "44D043336d081d50AEC028C53A10C6246B4f8123": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
+    "BD02092fA82faE7D4A25C03759418954817d7F6C": {
+      "balance": "0x21e19e0c9bab2400000"
+    }
+  }
+}

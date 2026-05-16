@@ -2,9 +2,6 @@
 NetworkId = 35039980
 SyncMode = "full"
 DisablePeerTxBroadcast = false
-EthDiscoveryURLs = []
-SnapDiscoveryURLs = []
-BscDiscoveryURLs = []
 NoPruning = false
 NoPrefetch = false
 DirectBroadcast = false
@@ -22,34 +19,17 @@ TriesVerifyMode = "local"
 Preimages = false
 FilterLogCacheSize = 0
 EnablePreimageRecording = false
-VMTrace = ""
-VMTraceJsonConfig = ""
-RPCGasCap = 0
-RPCEVMTimeout = 0
-RPCTxFeeCap = 0e+00
-BlobExtraReserve = 0
+RPCGasCap = 50000000
+RPCEVMTimeout = 5000000000
+RPCTxFeeCap = 1e+00
 
 [Eth.Miner]
-DelayLeftOver = 0
 GasFloor = 30000000
 GasCeil = 40000000
 GasPrice = 10000000000
 Recommit = 10000000000
 VoteEnable = false
-MaxWaitProposalInSecs = 0
 DisableVoteAttestation = false
-
-[Eth.Miner.Mev]
-Enabled = true
-GreedyMergeTx = true
-BuilderFeeCeil = "0"
-SentryURL = ""
-ValidatorCommission = 1000
-BidSimulationLeftOver = 50000000
-
-[[Eth.Miner.Mev.Builders]]
-Address = "0x0000000000000000000000000000000000000000"
-URL = ""
 
 [Eth.TxPool]
 Locals = []
@@ -62,43 +42,36 @@ AccountSlots = 5000
 GlobalSlots = 32768
 AccountQueue = 512
 GlobalQueue = 32768
-OverflowPoolSlots = 32768
 Lifetime = 86400000000000
-ReannounceTime = 0
-
-[Eth.BlobPool]
-Datadir = ""
-Datacap = 0
-PriceBump = 0
 
 [Eth.GPO]
-Blocks = 0
-Percentile = 0
-MaxHeaderHistory = 0
-MaxBlockHistory = 0
+Blocks = 20
+Percentile = 60
+MaxHeaderHistory = 1024
+MaxBlockHistory = 1024
+OracleThreshold = 20
 
 [Node]
-DataDir = "node_data"
+DataDir = "/home/omdadmin/bsc-testnode/node_data"
 InsecureUnlockAllowed = true
+NoUSB = true
 IPCPath = "geth.ipc"
 HTTPHost = "0.0.0.0"
-HTTPPort = 8545
+HTTPPort = 9545
 HTTPVirtualHosts = ["*"]
 HTTPModules = ["eth", "net", "web3", "txpool", "parlia", "debug"]
 WSHost = "0.0.0.0"
-WSPort = 8545
-WSModules = []
-
+WSPort = 9546
+WSModules = ["net", "web3", "eth", "txpool"]
+WSOrigins = ["*"]
 [Node.P2P]
 MaxPeers = 50
 NoDiscovery = false
 BootstrapNodes = []
 StaticNodes = []
 TrustedNodes = []
-ListenAddr = ":30315"
-DiscAddr = ""
+ListenAddr = ":31303"
 EnableMsgEvents = false
-PeerFilterPatterns = []
 
 [Node.HTTPTimeouts]
 ReadTimeout = 30000000000
@@ -106,15 +79,3 @@ ReadHeaderTimeout = 0
 WriteTimeout = 30000000000
 IdleTimeout = 120000000000
 
-[Node.LogConfig]
-FileRoot = ""
-FilePath = "node.log"
-MaxBytesSize = 10485760
-Level = "info"
-MaxBackups = 1000
-TimeFormat = "01-02|15:04:05.000"
-
-[FakeBeacon]
-Enable = false
-Addr = ""
-Port = 0
