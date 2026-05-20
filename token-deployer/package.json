@@ -1,0 +1,17 @@
+{
+  "name": "bsc-testnode-token-deployer",
+  "version": "1.0.0",
+  "description": "Despliega tokens ERC-20 (wBNB, wOMD, wUSDT) en BSC Casino Testnet",
+  "scripts": {
+    "deploy": "hardhat run scripts/deploy-tokens.js --network bscTestnode",
+    "compile": "hardhat compile"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0",
+    "dotenv": "^16.0.0"
+  }
+}

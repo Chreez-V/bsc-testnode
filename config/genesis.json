@@ -37,7 +37,7 @@
     "haberFixTime": 0,
     "bohrTime": 0,
     "parlia": {
-      "period": 30,
+      "period": 13,
       "epoch": 90000
     },
     "blobSchedule": {
